@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modular Monolith Workflow Progress</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e3de; --accent:#2f6fed; --ok:#1f9d55; --shared:#b45309; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --fg:#ecece8; --muted:#9a9a93; --card:#1f1f1d; --line:#33332f; --accent:#6b9bff; --ok:#4ade80; --shared:#fbbf24; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:0 0 12px; }
+  h3 { font-size:15px; margin:20px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-bottom:16px; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--ok); color:var(--ok); margin-left:8px; vertical-align:middle; }
+  .badge.todo { border-color:var(--muted); color:var(--muted); }
+  ul { margin:8px 0 0; padding-left:20px; }
+  pre { margin:0; padding:14px; background:var(--bg); border:1px solid var(--line); border-radius:8px; overflow-x:auto; font:13px/1.6 ui-monospace,Menlo,monospace; }
+  .shared { color:var(--shared); font-weight:600; }
+  .note { color:var(--muted); }
+  code { font:13px ui-monospace,Menlo,monospace; background:var(--bg); padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Modular Monolith: Claude Workflow</h1>
+  <p class="sub">Living progress page. Shows the total structure and the rule currently being designed. Finished rules are in <code>docs/coding-rules/backend.md</code>. Last updated: 2026-11-16</p>
+
+  <!-- ===== TOTAL STRUCTURE ===== -->
+  <section class="card">
+    <h2>Total structure so far</h2>
+    <p class="note">Sections 1 to 13 are written in <code>backend.md</code>. Items added by section 13 are marked <b>new</b>. <span class="shared">Orange</span> is <code>shared</code>. Every module repeats the module shape.</p>
+<pre>src/main/
+├── java/com/app/
+│   ├── <span class="shared">shared/</span>
+│   │   ├── config/                                 <span class="note">CacheConfig (Redis), SchedulingConfig (jobs, ShedLock, retry) <b>new</b></span>
+│   │   ├── integration/                            <span class="note">storage/ : ports + adapters used by 2+ modules</span>
+│   │   ├── utils/UuidV7.java
+│   │   ├── entities/                               <span class="note">BaseEntity, BaseSoftDeleteEntity</span>
+│   │   ├── constants/ApiPaths.java, PageDefaults.java   <span class="note">V1 = "/api/v1"; page size defaults</span>
+│   │   ├── pagination/                             <span class="note">PageRequestDto, PageRequestDtoToPageableMapper</span>
+│   │   ├── web/CorrelationIdFilter.java
+│   │   ├── message/
+│   │   │   ├── MessageService.java                 <span class="note">key + args → text</span>
+│   │   │   └── MessageConfig.java                  <span class="note">scans messages/**, wires Bean Validation</span>
+│   │   ├── response/                               <span class="note">ApiResponse, PageInfo, ErrorInfo, FieldErrorInfo, PagedResponses</span>
+│   │   ├── validation/                             <span class="note">constraints used by 2+ modules</span>
+│   │   │   ├── annotation/  validator/  message/
+│   │   ├── exception/
+│   │   │   ├── handler/GlobalExceptionHandler.java
+│   │   │   ├── types/                              <span class="note">ErrorCode, BaseException, shared exceptions</span>
+│   │   │   └── message/SharedExceptionMessages.java
+│   │   └── docs/
+│   │       ├── annotations/StandardErrorsDoc.java, PageableDoc.java
+│   │       └── examples/ErrorExamples.java
+│   │
+│   ├── notifications/                              <span class="note">channels (email, sms, push)</span>
+│   └── &lt;module&gt;/                                  <span class="note">e.g. orders, payments</span>
+│       ├── api/
+│       │   ├── controller/XController.java
+│       │   ├── dto/
+│       │   │   ├── request/XRequest.java, XSearchRequest.java   <span class="note">class + validation; filters</span>
+│       │   │   ├── response/XResponse.java         <span class="note">record</span>
+│       │   │   └── mapper/response/XModelToXResponseMapper.java
+│       │   ├── response/
+│       │   │   └── message/                        <span class="note">success message keys (not the DTO)</span>
+│       │   │       └── XResponseMessages.java
+│       │   ├── validation/                         <span class="note">before the service</span>
+│       │   │   ├── annotation/
+│       │   │   ├── validator/
+│       │   │   └── message/CreateXRequestMessages.java
+│       │   └── docs/
+│       │       ├── annotations/CreateXDoc.java
+│       │       └── examples/XExamples.java
+│       ├── validation/                             <span class="note">business rules, called by the service</span>
+│       │   └── validator/XCancelValidator.java
+│       ├── model/
+│       │   ├── XModel.java
+│       │   └── mapper/                             <span class="note">Request → Model, Entity → Model; XSearchModel</span>
+│       ├── service/XService.java
+│       ├── integration/                            <span class="note">third-party ports + adapters owned by this module</span>
+│       ├── job/XJob.java, XJobProperties.java       <span class="note">scheduled triggers <b>new</b></span>
+│       ├── event/                                  <span class="note">events it publishes + payload/ + listener/ (reactions to other modules' events)</span>
+│       ├── repository/XRepository.java
+│       │   └── specification/XSpecifications.java   <span class="note">Specifications</span>
+│       ├── entities/
+│       │   ├── XEntity.java
+│       │   └── mapper/XModelToXEntityMapper.java
+│       ├── enums/
+│       ├── constants/XSortFields.java              <span class="note">sort allowlist</span>
+│       ├── constants/enums/XErrorCode.java         <span class="note">code + messageKey + HTTP status</span>
+│       └── exception/
+│           ├── handler/XExceptionHandler.java
+│           ├── types/XException.java
+│           └── message/XExceptionMessages.java     <span class="note">key constants for error text</span>
+│
+└── resources/
+    ├── application.yml                             <span class="note">shared config</span>
+    ├── application-dev.yml                         <span class="note">IDE</span>
+    ├── application-docker.yml                      <span class="note">local Docker</span>
+    ├── application-prod.yml                        <span class="note">production</span>
+    ├── db/migration/                               <span class="note">Flyway: shared/ (incl. shedlock table <b>new</b>) and &lt;module&gt;/, timestamp versions</span>
+    └── messages/                                   <span class="note">all message text, .properties</span>
+        ├── <span class="shared">shared/</span>
+        │   ├── api/{response,validation}/
+        │   └── exception/
+        └── &lt;module&gt;/
+            ├── api/{response,validation}/
+            └── exception/                          <span class="note">all error text, one place</span></pre>
+  </section>
+
+  <!-- ===== CURRENT RULE ===== -->
+  <section class="card">
+    <h2>Section 13: Background jobs <span class="badge">done, written in backend.md section 13</span></h2>
+    <p class="note">Decisions applied: ShedLock from the start (PostgreSQL table), <code>fixedDelay</code> by default (cron only for calendar times), next run is the retry (<code>@Retryable</code> only around vendor calls, max 3, backoff), batch size 100 set in yml.</p>
+
+    <h3>Folders (new items only)</h3>
+<pre><span class="shared">shared/</span>
+└── config/SchedulingConfig.java                 <span class="note">@EnableScheduling, @EnableSchedulerLock, @EnableRetry, job thread pool, LockProvider</span>
+
+&lt;module&gt;/
+├── job/
+│   ├── ExpiredOrderCleanupJob.java              <span class="note">thin trigger: lock, call service, log</span>
+│   └── OrdersJobProperties.java                 <span class="note">@ConfigurationProperties record: batch size, delays</span>
+└── service/OrderService.java                    <span class="note">expireOverdue(batchSize): one batch, one transaction</span>
+
+src/main/resources/db/migration/shared/
+└── V202611161100__shared_create_shedlock.sql    <span class="note">the lock table</span></pre>
+
+    <h3>Flow of one run</h3>
+<pre>Scheduler thread (pool "job-")  → sets a new correlationId in MDC
+ → @SchedulerLock                → only one instance gets the lock, others skip silently
+ → ExpiredOrderCleanupJob.run()  → logs started
+ → loop: orderService.expireBatch(batchSize)    each call = one short transaction, returns rows processed
+ → stop when a batch returns less than batchSize (or max batches reached)
+ → logs completed (processed_count, duration_ms)
+ → on unexpected failure: logs failed once with stack trace (the job is its own failure boundary)
+ → next fixedDelay run picks up whatever is left (that is the retry)</pre>
+
+    <h3>The job</h3>
+<pre>// orders/job/ExpiredOrderCleanupJob.java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ExpiredOrderCleanupJob {
+
+    private static final String JOB_ID = "orders.expired-cleanup";
+    private static final int MAX_BATCHES = 100;                       // safety stop
+
+    private final OrderService orderService;
+    private final OrdersJobProperties properties;
+
+    @Scheduled(fixedDelayString = "${app.orders.jobs.expired-cleanup.fixed-delay}")
+    @SchedulerLock(name = JOB_ID,
+            lockAtMostFor  = "${app.orders.jobs.expired-cleanup.lock-at-most-for}",
+            lockAtLeastFor = "${app.orders.jobs.expired-cleanup.lock-at-least-for}")
+    public void run() {
+        long start = System.nanoTime();
+        int total = 0;
+        try {
+            int batchSize = properties.expiredCleanup().batchSize();
+            for (int i = 0; i &lt; MAX_BATCHES; i++) {
+                int processed = orderService.expireBatch(batchSize);  // own transaction per call
+                total += processed;
+                if (processed &lt; batchSize) break;
+            }
+            log.atInfo()
+               .addKeyValue("event", "order.expired-cleanup.completed")
+               .addKeyValue("job_id", JOB_ID)
+               .addKeyValue("processed_count", total)
+               .addKeyValue("duration_ms", Duration.ofNanos(System.nanoTime() - start).toMillis())
+               .log("Expired order cleanup finished");
+        } catch (Exception e) {
+            log.atError().setCause(e)
+               .addKeyValue("event", "order.expired-cleanup.failed")
+               .addKeyValue("job_id", JOB_ID)
+               .addKeyValue("attempt", 1)
+               .log("Expired order cleanup failed");                  // next run retries
+        }
+    }
+}
+
+// orders/service/OrderService.java: the job's only call, safe to run twice
+@Transactional
+public int expireBatch(int batchSize) {
+    List&lt;OrderEntity&gt; overdue = orderRepository.findOverdueNotExpired(Instant.now(), PageRequest.of(0, batchSize));
+    overdue.forEach(OrderEntity::markExpired);                        // rows already expired are not selected again
+    return overdue.size();
+}</pre>
+
+    <h3>Settings</h3>
+<pre># application.yml
+app:
+  orders:
+    jobs:
+      expired-cleanup:
+        fixed-delay: 5m
+        lock-at-most-for: 10m          # must be longer than the longest normal run
+        lock-at-least-for: 30s
+        batch-size: 100
+
+// orders/job/OrdersJobProperties.java
+@Validated
+@ConfigurationProperties(prefix = "app.orders.jobs")
+public record OrdersJobProperties(@Valid ExpiredCleanup expiredCleanup) {
+    public record ExpiredCleanup(@Min(1) @Max(1000) int batchSize) {}
+}
+
+-- db/migration/shared/V202611161100__shared_create_shedlock.sql
+CREATE TABLE shedlock (
+    name       VARCHAR(64)  NOT NULL,
+    lock_until TIMESTAMP    NOT NULL,
+    locked_at  TIMESTAMP    NOT NULL,
+    locked_by  VARCHAR(255) NOT NULL,
+    CONSTRAINT pk_shedlock PRIMARY KEY (name)
+);</pre>
+
+    <h3>Retry around a vendor call (not around a job)</h3>
+<pre>// payments/integration/stripe/StripePaymentGateway.java
+@Retryable(retryFor = TransientVendorException.class,
+           maxAttempts = 3,
+           backoff = @Backoff(delay = 500, multiplier = 2))
+public PaymentModel charge(ChargeRequest request) { ... }
+
+// retries only transient errors (timeouts, 5xx). Never business failures such as a declined card.</pre>
+
+    <h3>Rules (will go into backend.md)</h3>
+<pre>Place        jobs live in &lt;module&gt;/job/, named &lt;What&gt;Job. A job is a thin trigger: lock, one call to a service, log. No business logic.
+Schedule     never hardcoded. Values come from application.yml under app.&lt;module&gt;.jobs.&lt;name&gt;.
+             fixedDelay by default. Cron only for calendar times ("every day at 02:00"), in UTC.
+Pool         shared/config/SchedulingConfig provides a dedicated pool, so jobs never block listeners. Each run gets a new correlationId.
+Locking      every job has @SchedulerLock (ShedLock, table "shedlock" in PostgreSQL, Flyway migration in shared).
+             Name = job id. lockAtMostFor is longer than the longest normal run.
+Idempotent   every job is safe to run twice. It selects only rows that still need work.
+Batches      bounded batch size from yml, one short transaction per batch inside the service, a max-batches safety stop.
+             The job loop never sits inside one transaction.
+Retries      the next run is the retry. @Retryable (max 3, exponential backoff) only around vendor calls and only for transient errors.
+Failure      the job is its own failure boundary: one terminal log with stack trace. One bad item never stops the batch.
+Logging      events &lt;module&gt;.&lt;job&gt;.started|completed|failed, fields job_id, attempt, processed_count, duration_ms.
+             Summaries only, never one line per item. An idle run logs at DEBUG.
+Settings     typed @ConfigurationProperties record with @Validated, kebab-case keys.
+Tests        the service method (including a second run that does nothing). Lock behavior later with Testcontainers.</pre>
+  </section>
+
+  <!-- NEXT RULE GOES HERE -->
+</main>
+</body>
+</html>
