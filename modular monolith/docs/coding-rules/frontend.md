@@ -190,3 +190,117 @@ export async function getOrder(id: string): Promise<Order> {
 7. `cache: "no-store"` is the default, so data is always fresh. Caching rules are added in a later section.
 8. These functions run on the server first, because `page.tsx` is a Server Component by default. Calling them from the browser is covered in the later client components section.
 9. An async function returns a `Promise<T>`. Callers use `await`.
+
+## 4. Error handling
+
+Expected failures (a missing order) are handled where they happen. Unexpected failures are thrown and caught by the nearest error boundary. This is the backend idea of module handlers first and a global handler as the fallback.
+
+### Folder structure
+
+```
+app/
+├── not-found.tsx            default 404 screen (also used for unmatched URLs)
+├── error.tsx                default error screen
+├── global-error.tsx         failures in the root layout
+└── orders/
+    └── error.tsx            optional, only if this area needs its own
+
+shared/
+├── api/not-found-on-404.ts  turns an ApiError 404 into notFound()
+└── components/
+    ├── error-screen.tsx     the one real error screen
+    └── not-found-screen.tsx the one real 404 screen
+```
+
+### Rules
+
+1. Two kinds of failure. Expected ones are handled explicitly in code. Unexpected ones are thrown and land in the nearest `error.tsx`.
+2. Catch only what you can handle. A page never catches everything, the same as a backend module handler never catches `Exception`.
+3. A missing resource is `ApiError` with status 404. Pages wrap the call with `notFoundOn404(...)`, which calls `notFound()` for a 404 and rethrows anything else.
+4. `notFound()` works by throwing. Call it in the render path (a page, or a function the page awaits), never inside a promise that nobody awaits.
+5. `error.tsx` must be a Client Component, so it starts with `"use client"`. The nearest `error.tsx` wins. Start with one default in `app/` and add a folder-level one only when that area needs different wording or behaviour.
+6. Every `error.tsx` is thin. It renders the shared `ErrorScreen` and passes its props through. The real screen is written once, in `shared/components/`.
+7. Errors thrown in Server Components reach `error.tsx` with a generic message and a `digest` reference, not the real details. In production the `ApiError` fields never reach the screen. The screen shows a safe generic text and the `digest` as a reference, and nothing else from the error.
+8. The `error` prop is typed `unknown`. Narrow it (`instanceof Error`) before reading `digest`.
+9. The real error is logged once, on the server, and the `digest` matches that log line. Error screens do not log or rethrow server errors again.
+10. Use `retry()` for the "Try again" button. It re-fetches and re-renders the segment. Use `reset()` only to clear the error state without re-fetching. (`retry` is stable from Next.js 16.3. On an older version use `reset`.)
+11. `global-error.tsx` replaces the root layout when it is active, so it must include its own `<html>` and `<body>` and cannot rely on global styles. Keep it minimal. It cannot export `metadata`.
+12. The root `not-found.tsx` handles `notFound()` and any URL that matches no route. It is sent with every route, so it stays a Server Component with no interactive UI. `global-not-found` is experimental and is not used.
+13. Error boundaries do not catch errors in event handlers or in async code that runs after rendering. Those are handled inside the component (see the client components section).
+14. Not-authenticated (401) handling is defined with authentication, in a separate part.
+15. Screen text is not hardcoded. It comes from message keys (see the messages and configuration section). The examples below use plain text only to stay short.
+
+### The helper and a page
+
+```ts
+// shared/api/not-found-on-404.ts
+import { notFound } from "next/navigation";
+
+export async function notFoundOn404<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) notFound(); // expected: show the 404 screen
+    throw e;                                                   // anything else: bubble up
+  }
+}
+```
+
+```tsx
+// app/orders/[id]/page.tsx
+export default async function OrderPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const order = await notFoundOn404(getOrder(id));
+  return <OrderDetails order={order} />;
+}
+```
+
+### The screens
+
+```tsx
+// shared/components/error-screen.tsx
+"use client";
+
+export function ErrorScreen({ error, retry }: { error: unknown; retry: () => void }) {
+  const digest = error instanceof Error ? (error as Error & { digest?: string }).digest : undefined;
+  return (
+    <div>
+      <h2>Something went wrong</h2>
+      {digest && <p>Reference: {digest}</p>}
+      <button onClick={() => retry()}>Try again</button>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/error.tsx
+"use client";
+
+export default function RootError(props: { error: unknown; retry: () => void }) {
+  return <ErrorScreen {...props} />;
+}
+```
+
+```tsx
+// app/global-error.tsx
+"use client";
+
+export default function GlobalError({ retry }: { error: unknown; retry: () => void }) {
+  return (
+    <html>
+      <body>
+        <h2>Something went wrong</h2>
+        <button onClick={() => retry()}>Try again</button>
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// app/not-found.tsx  (a Server Component, so no "use client")
+export default function NotFound() {
+  return <NotFoundScreen />;
+}
+```
