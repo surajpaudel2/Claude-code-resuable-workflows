@@ -1,5 +1,75 @@
 # Frontend Coding Rules (Next.js, TypeScript)
 
+## Complete folder structure
+
+One view of everything. Each folder is explained in the section named on its line. `orders` is the worked example feature, and every other feature has the same set of folders.
+
+```
+my-app/
+├── .env.local                          real values, git-ignored (section 8)
+├── .env.example                        committed, dummy values (section 8)
+├── components.json                     shadcn CLI settings (section 12)
+├── public/                             static files
+└── src/
+    ├── instrumentation.ts              startup check, calls getEnv() (section 8)
+    │
+    ├── app/                            ROUTES ONLY, thin pages (section 1)
+    │   ├── globals.css                 imports Tailwind and shared/theme (section 11)
+    │   ├── layout.tsx                  fonts, providers, <html suppressHydrationWarning>
+    │   ├── page.tsx                    "/"
+    │   ├── error.tsx                   default error screen (section 4)
+    │   ├── global-error.tsx            root layout failures (section 4)
+    │   ├── not-found.tsx               404 screen (section 4)
+    │   ├── login/page.tsx              "/login"
+    │   ├── orders/
+    │   │   ├── page.tsx                "/orders" (list, section 6)
+    │   │   ├── error.tsx               optional, only if needed
+    │   │   └── [id]/page.tsx           "/orders/123"
+    │   └── payments/my/page.tsx        "/payments/my"
+    │
+    ├── features/                       ONE FOLDER PER BUSINESS AREA (section 2)
+    │   ├── auth/
+    │   ├── payments/
+    │   └── orders/
+    │       ├── api/                    one function per endpoint (section 3)
+    │       │   └── validation/         RESPONSE validation, one schema per endpoint (section 9)
+    │       ├── constants/              order-status, order-limits, sort fields (section 10)
+    │       ├── dto/                    raw backend shapes
+    │       ├── mapper/                 DTO <-> model (<Source>To<Target>)
+    │       ├── model/                  shapes the UI uses
+    │       ├── schema/                 FIELD validation: Zod schemas, search params (sections 5, 6)
+    │       ├── validation/
+    │       │   └── business/           BUSINESS rules, one per file, plus the list (section 9)
+    │       ├── actions/                server actions, "use server" (sections 5, 7)
+    │       ├── messages/               orders.messages.ts, tOrders (section 8)
+    │       ├── components/             one file when small, a folder when it has parts (section 13)
+    │       ├── service/                reserved, added when needed
+    │       └── index.ts                the only door other features may use
+    │
+    └── shared/                         USED BY 2+ FEATURES, never imports features
+        ├── api/                        api-response, api-error, api-client, parse-response, not-found-on-404
+        ├── actions/                    action-result
+        ├── components/
+        │   ├── ui/                     shadcn primitives (section 12)
+        │   ├── buttons/                submit-button, icon-button, theme-toggle
+        │   ├── forms/                  form-field, field-errors
+        │   ├── feedback/               error-screen, not-found-screen, empty-state, badge, spinner
+        │   ├── layout/                 page-header, container
+        │   └── motion/                 fade-in, fade-up
+        ├── config/                     env.ts, server only (section 8)
+        ├── constants/                  routes, api-paths, api-error-codes, http-status, cookie-names, storage-keys, page-defaults (section 10)
+        ├── forms/                      form-state, form-values-from, field-errors-from, translate-field-errors
+        ├── format/                     format-config, format-date, format-money (section 8)
+        ├── messages/                   create-translator, shared.messages (section 8)
+        ├── pagination/                 page-params.schema, page-result, href-with, next-sort (section 6)
+        ├── providers/                  app-providers: theme and motion config (section 11)
+        ├── theme/                      tokens.css, typography.css, fonts, motion, theme-provider (section 11)
+        ├── utils/                      cn
+        └── validation/                 rule, runRules, field-errors-from-violations, fields/ (section 9)
+```
+
+Dependencies point one way: `app` uses `features`, `features` use `shared`, and never the reverse. Features talk to each other only through `index.ts`.
+
 ## 1. Stack and project layout
 
 Next.js (App Router) with TypeScript only, using a `src/` folder. The frontend mirrors the backend idea: feature folders play the role of modules, and `shared` holds what more than one feature uses.
@@ -38,6 +108,8 @@ my-app/
 7. A feature never imports another feature's internals. Other features may use only what its `index.ts` exports (see section 2).
 8. File and folder names are lowercase kebab-case (`get-order.api.ts`, `order-card.tsx`). Route folders follow the URL.
 9. Secrets are never committed. Real values go in `.env.local`, and `.env.example` lists every variable with a dummy value. A variable without the `NEXT_PUBLIC_` prefix is visible to the server only, which is the default for everything here.
+10. Styling uses Tailwind CSS with shadcn/ui components, `next-themes` for light and dark mode, and `motion` for animation (sections 11 and 12).
+11. `@/` points to `src/` (the `create-next-app` default). Imports that cross a zone use `@/`. Imports inside one feature are relative.
 
 ## 2. Feature structure and boundaries
 
@@ -160,15 +232,15 @@ export class ApiError extends Error {
 
 ```ts
 // shared/api/api-client.ts
-export async function apiGet<T>(path: string): Promise<T> {
+export async function apiGet<T>(path: string, schema: z.ZodType<T>): Promise<T> {
   const res = await fetch(`${getEnv().API_BASE_URL}${path}`, { cache: "no-store" });
-  const body = (await res.json()) as ApiResponse<T>;
+  const body = (await res.json()) as ApiResponse<unknown>;
 
-  if (!res.ok || !body.success) {
-    throw new ApiError(res.status, body.error?.code ?? "UNKNOWN",
+  if (!res.ok || !body.success) {                       // envelope check
+    throw new ApiError(res.status, body.error?.code ?? ApiErrorCodes.UNKNOWN,
       body.message, body.error?.details, body.correlationId);
   }
-  return body.data as T;
+  return parseData(schema, body.data, body.correlationId); // shape check (section 9)
 }
 ```
 
@@ -177,14 +249,14 @@ export async function apiGet<T>(path: string): Promise<T> {
 ```ts
 // features/orders/api/get-order.api.ts
 export async function getOrder(id: string): Promise<Order> {
-  const dto = await apiGet<OrderResponseDto>(`${API_PATHS.V1}/orders/${id}`);
+  const dto = await apiGet(`${API_PATHS.V1}/orders/${id}`, orderResponseSchema);
   return orderResponseDtoToOrder(dto);
 }
 ```
 
 ### Rules
 
-1. Only `shared/api/api-client.ts` reads the envelope. It returns the `data` part, typed by the caller (`apiGet<OrderResponseDto>`).
+1. Only `shared/api/api-client.ts` reads the envelope. It returns the `data` part after the shape check against the endpoint's schema (`apiGet(path, orderResponseSchema)`, section 9).
 2. Every failure becomes an `ApiError` with the backend's stable `code`, the HTTP `status`, the field `details` and the `correlationId`. Screens switch on `code`, never on the message.
 3. A feature api function is named `<verb><Resource>` (`getOrder`, `searchOrders`, `cancelOrder`). The file is named `<verb>-<resource>.api.ts`.
 4. A feature api function takes plain values or models, calls the client, maps the DTO, and returns a model. It contains no other logic.
@@ -210,7 +282,7 @@ app/
 
 shared/
 ├── api/not-found-on-404.ts  turns an ApiError 404 into notFound()
-└── components/
+└── components/feedback/
     ├── error-screen.tsx     the one real error screen
     └── not-found-screen.tsx the one real 404 screen
 ```
@@ -222,7 +294,7 @@ shared/
 3. A missing resource is `ApiError` with status 404. Pages wrap the call with `notFoundOn404(...)`, which calls `notFound()` for a 404 and rethrows anything else.
 4. `notFound()` works by throwing. Call it in the render path (a page, or a function the page awaits), never inside a promise that nobody awaits.
 5. `error.tsx` must be a Client Component, so it starts with `"use client"`. The nearest `error.tsx` wins. Start with one default in `app/` and add a folder-level one only when that area needs different wording or behaviour.
-6. Every `error.tsx` is thin. It renders the shared `ErrorScreen` and passes its props through. The real screen is written once, in `shared/components/`.
+6. Every `error.tsx` is thin. It renders the shared `ErrorScreen` and passes its props through. The real screen is written once, in `shared/components/feedback/`.
 7. Errors thrown in Server Components reach `error.tsx` with a generic message and a `digest` reference, not the real details. In production the `ApiError` fields never reach the screen. The screen shows a safe generic text and the `digest` as a reference, and nothing else from the error.
 8. The `error` prop is typed `unknown`. Narrow it (`instanceof Error`) before reading `digest`.
 9. The real error is logged once, on the server, and the `digest` matches that log line. Error screens do not log or rethrow server errors again.
@@ -261,7 +333,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
 ### The screens
 
 ```tsx
-// shared/components/error-screen.tsx
+// shared/components/feedback/error-screen.tsx
 "use client";
 
 export function ErrorScreen({ error, retry }: { error: unknown; retry: () => void }) {
@@ -328,7 +400,7 @@ shared/
 │   ├── form-state.ts            FormState, the result every form action returns
 │   ├── form-values-from.ts      FormData -> plain object of text values
 │   └── field-errors-from.ts     backend FieldErrorInfo[] -> field -> messages
-└── components/
+└── components/forms/
     └── field-errors.tsx         shows the error list under one input
 
 features/<feature>/
@@ -424,7 +496,7 @@ export function fieldErrorsFrom(details: FieldErrorInfo[]): Record<string, strin
 ```
 
 ```tsx
-// shared/components/field-errors.tsx
+// shared/components/forms/field-errors.tsx
 export function FieldErrors({ errors }: { errors?: string[] }) {
   if (!errors?.length) return null;
   return (
@@ -452,19 +524,25 @@ export async function createOrderAction(_prev: FormState, formData: FormData): P
     };
   }
 
+  const violations = runRules(createOrderRules, parsed.data);        // business rules (section 9)
+  if (violations.length > 0) {
+    return {
+      status: "error",
+      fieldErrors: fieldErrorsFromViolations(violations, orderMessages),
+      values,
+    };
+  }
+
   let order: Order;
   try {
     order = await createOrder(createOrderFormToCreateOrderRequestDto(parsed.data)); // check 3 runs in the backend
   } catch (e) {
-    if (e instanceof ApiError) {
-      if (e.status === 400) return { status: "error", fieldErrors: fieldErrorsFrom(e.details), values };
-      if (e.status === 409 || e.status === 422) return { status: "error", formError: e.message, values };
-    }
-    throw e; // anything else goes to error.tsx
+    return backendErrorToFormState(e, values); // section 13 shows this helper
   }
 
-  redirect(`/orders/${order.id}`); // outside the try/catch
+  redirect(ROUTES.ORDERS.DETAIL(order.id)); // outside the try/catch
 }
+
 ```
 
 ### The form
@@ -629,13 +707,16 @@ export type PageInfo = {
 // shared/api/api-client.ts
 export type Paged<T> = { items: T[]; pagination: PageInfo };
 
-export async function apiGetPage<T>(path: string): Promise<Paged<T>> {
-  const body = await send<T[]>(path); // the same fetch and ApiError handling as apiGet
-  return { items: body.data ?? [], pagination: body.pagination as PageInfo };
+export async function apiGetPage<T>(path: string, itemSchema: z.ZodType<T>): Promise<Paged<T>> {
+  const body = await send<unknown[]>(path); // the same fetch and envelope check as apiGet
+  return {
+    items: parseData(z.array(itemSchema), body.data ?? [], body.correlationId),
+    pagination: body.pagination as PageInfo,
+  };
 }
 ```
 
-`send` is the private fetch-and-error part of `apiGet`. `apiGet` returns `(await send<T>(path)).data as T`.
+`send` is the private fetch-and-error part of `apiGet`. `apiGet` is `send` followed by `parseData(schema, body.data, body.correlationId)`.
 
 ```ts
 // shared/pagination/page-result.ts
@@ -662,7 +743,7 @@ export async function searchOrders(params: OrderSearchParams): Promise<PageResul
   });
   if (params.status) query.set("status", params.status);
 
-  const paged = await apiGetPage<OrderResponseDto>(`${API_PATHS.V1}/orders?${query}`);
+  const paged = await apiGetPage(`${API_PATHS.V1}/orders?${query}`, orderResponseSchema);
   return toPageResult(paged, orderResponseDtoToOrder);
 }
 ```
@@ -809,13 +890,13 @@ features/<feature>/
 // shared/api/api-client.ts
 import "server-only";
 
-export async function apiPost<T>(path: string, payload?: unknown): Promise<T> {
-  const body = await send<T>(path, {
+export async function apiPost<T>(path: string, schema: z.ZodType<T>, payload?: unknown): Promise<T> {
+  const body = await send<unknown>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
-  return body.data as T;
+  return parseData(schema, body.data, body.correlationId);
 }
 ```
 
@@ -826,7 +907,7 @@ export async function apiPost<T>(path: string, payload?: unknown): Promise<T> {
 ```ts
 // features/orders/api/cancel-order.api.ts
 export async function cancelOrder(id: string): Promise<Order> {
-  const dto = await apiPost<OrderResponseDto>(`${API_PATHS.V1}/orders/${id}/cancel`);
+  const dto = await apiPost(`${API_PATHS.V1}/orders/${id}/cancel`, orderResponseSchema);
   return orderResponseDtoToOrder(dto);
 }
 ```
@@ -964,6 +1045,7 @@ export function createTranslator<T extends Record<string, string>>(messages: T) 
 // shared/messages/shared.messages.ts
 export const sharedMessages = {
   "shared.form.invalid": "This value is not valid",
+  "shared.api.invalid_response": "The server sent an unexpected response",
 } as const;
 
 export const tShared = createTranslator(sharedMessages);
@@ -1085,3 +1167,816 @@ export function formatMoney(amount: number, currency: string): string {
 <td>{formatMoney(order.amount, order.currency)}</td>
 <td>{formatDateTime(order.createdAt)}</td>
 ```
+
+## 9. Validation
+
+A value is checked in three different ways for three different reasons. Each kind has its own folder, so a reader always knows where a check lives.
+
+| Kind | Question it answers | Lives in | Runs |
+|---|---|---|---|
+| Field | Is each value well-formed (type, length, format)? | `schema/`, reusable parts in `shared/validation/fields/` | In the action, before any backend call |
+| Business | Is this combination of values allowed? | `validation/business/` | In the action, after field validation passes |
+| Response | Did the backend send what it promised? | `api/validation/` | On every backend response |
+
+### Folder structure
+
+```
+shared/
+├── validation/
+│   ├── rule.ts                          Rule<T>, RuleViolation, runRules
+│   ├── field-errors-from-violations.ts  violations -> FormState field errors
+│   └── fields/                          reusable field definitions (moneyField, emailField)
+└── api/
+    ├── parse-response.ts                parseData: the response shape check
+    └── api-client.ts                    apiGet(path, schema), apiGetPage, apiPost
+
+features/<feature>/
+├── schema/                              FIELD validation (sections 5 and 6)
+├── constants/order-limits.ts            the numbers the rules use
+├── validation/
+│   └── business/                        BUSINESS validation
+│       ├── amount-within-limit.rule.ts           one rule per file
+│       ├── note-required-for-large-order.rule.ts
+│       ├── create-order-rules.ts                 the list of rules for the form
+│       └── create-order-rule.messages.ts         message key constants
+└── api/
+    ├── get-order.api.ts
+    └── validation/
+        └── order-response.schema.ts     RESPONSE validation, one schema per endpoint
+```
+
+### How the three fit together
+
+1. The browser form sends the values to the server action.
+2. The action runs field validation (Zod). If it fails, it returns the field errors.
+3. The action runs the business rules on the validated values. If any rule is violated, it returns all the violations as field errors.
+4. The action calls the backend. The backend repeats every rule and is the final authority.
+5. The api function checks the backend's response shape before it maps it.
+
+### Rules
+
+1. The three kinds stay apart. A schema never holds a business rule, a business rule never checks a format, and a response schema is never reused for a form.
+2. The frontend has only business rules that need nothing but the submitted values and fixed limits (a comparison between two fields, a maximum amount). Anything that needs stored data (stock, balance, duplicates, permissions) is decided by the backend and shown through its field errors (section 5).
+3. The backend repeats every rule. Frontend rules exist for quick feedback and are never the security.
+4. A business rule is one function of the type `Rule<T>`. It takes the validated input and returns a `RuleViolation` or `null`. One rule per file, named `<what-it-checks>.rule.ts`.
+5. A rule is a pure function. It does not throw, call the network, read the clock or change its input.
+6. The rules for a form are listed in `<form>-rules.ts`. `runRules` runs every rule and collects all violations, so the user sees every problem at once. Adding a rule means one new file and one new line in the list. The runner, the action and the form do not change. This is the strategy pattern, and it keeps the code open for extension and closed for modification.
+7. A violation carries a `field` and a message key, never text. Keys are constants in `<form>-rule.messages.ts`, checked against the feature's message file (section 8). Limits come from `constants/` (`OrderLimits`), never typed inside a rule.
+8. An action runs the stages in order: field validation, business rules, backend call. The first stage that fails returns a `FormState` with `fieldErrors`, and the later stages do not run.
+9. New reusable field definitions go in `shared/validation/fields/`. The page, size and sort fields stay in `shared/pagination/` (section 6).
+10. Every client call takes a Zod schema: `apiGet(path, schema)`, `apiGetPage(path, itemSchema)`, `apiPost(path, schema, payload)`. The envelope is checked first, then the shape of `data`.
+11. A failed shape check throws `ApiError` with status 502 and code `INVALID_RESPONSE`. The user sees the generic message, never the list of issues.
+12. Each endpoint has one response schema in `api/validation/<name>-response.schema.ts`. It is declared with `satisfies z.ZodType<Dto>`, so the build fails when the schema and the DTO type drift apart. DTO types stay in `dto/`.
+13. A response schema lists only the fields the frontend uses. Extra fields are ignored. If the backend renames or removes a field we use, the failure appears at the api boundary, not as "Invalid Date" on a screen.
+14. Tests: each rule (violated and not violated), `runRules` collecting more than one violation, and each response schema (a valid sample passes, a missing field fails).
+
+### The rule type and the runner
+
+```ts
+// shared/validation/rule.ts
+export type RuleViolation = { field: string; key: string };
+
+export type Rule<T> = (input: T) => RuleViolation | null;
+
+export function runRules<T>(rules: readonly Rule<T>[], input: T): RuleViolation[] {
+  return rules.flatMap((rule) => rule(input) ?? []);
+}
+```
+
+```ts
+// shared/validation/field-errors-from-violations.ts
+export function fieldErrorsFromViolations(
+  violations: RuleViolation[],
+  messages: Record<string, string>,
+): Record<string, string[]> {
+  const keys: Record<string, string[]> = {};
+  for (const { field, key } of violations) {
+    (keys[field] ??= []).push(key);
+  }
+  return translateFieldErrors(keys, messages);
+}
+```
+
+### Business rules for the create-order form
+
+```ts
+// features/orders/constants/order-limits.ts
+export const OrderLimits = {
+  MAX_AMOUNT: 10_000,
+  NOTE_REQUIRED_ABOVE: 5_000,
+} as const;
+```
+
+```ts
+// features/orders/validation/business/create-order-rule.messages.ts
+export const CreateOrderRuleMessages = {
+  AMOUNT_TOO_HIGH: "order.rule.amount.max",
+  NOTE_REQUIRED: "order.rule.note.required",
+} as const satisfies Record<string, OrderMessageKey>;
+```
+
+```ts
+// added to features/orders/messages/orders.messages.ts
+"order.rule.amount.max": "Amount must be at most 10000",
+"order.rule.note.required": "A note is required for orders over 5000",
+```
+
+The text contains the number itself, so it is kept in step with `OrderLimits` (section 8, rule 8).
+
+```ts
+// features/orders/validation/business/amount-within-limit.rule.ts
+export const amountWithinLimit: Rule<CreateOrderForm> = (input) =>
+  input.amount > OrderLimits.MAX_AMOUNT
+    ? { field: "amount", key: CreateOrderRuleMessages.AMOUNT_TOO_HIGH }
+    : null;
+```
+
+```ts
+// features/orders/validation/business/note-required-for-large-order.rule.ts
+export const noteRequiredForLargeOrder: Rule<CreateOrderForm> = (input) =>
+  input.amount > OrderLimits.NOTE_REQUIRED_ABOVE && !input.note
+    ? { field: "note", key: CreateOrderRuleMessages.NOTE_REQUIRED }
+    : null;
+```
+
+```ts
+// features/orders/validation/business/create-order-rules.ts
+export const createOrderRules: readonly Rule<CreateOrderForm>[] = [
+  amountWithinLimit,
+  noteRequiredForLargeOrder,
+];
+```
+
+The action (section 5) runs them after field validation and before the backend call:
+
+```ts
+const violations = runRules(createOrderRules, parsed.data);
+if (violations.length > 0) {
+  return {
+    status: "error",
+    fieldErrors: fieldErrorsFromViolations(violations, orderMessages),
+    values,
+  };
+}
+```
+
+### Response validation
+
+```ts
+// features/orders/api/validation/order-response.schema.ts
+import { z } from "zod";
+
+export const orderResponseSchema = z.object({
+  id: z.string(),
+  amount: z.number(),
+  currency: z.string(),
+  createdAt: z.iso.datetime(),
+}) satisfies z.ZodType<OrderResponseDto>;
+```
+
+```ts
+// shared/api/parse-response.ts
+export function parseData<T>(schema: z.ZodType<T>, data: unknown, correlationId?: string): T {
+  const parsed = schema.safeParse(data);
+  if (!parsed.success) {
+    throw new ApiError(
+      HttpStatus.BAD_GATEWAY,
+      ApiErrorCodes.INVALID_RESPONSE,
+      tShared("shared.api.invalid_response"),
+      [],
+      correlationId,
+    );
+  }
+  return parsed.data;
+}
+```
+
+`apiGet`, `apiGetPage` and `apiPost` call `parseData` after the envelope check (sections 3, 6 and 7 show the calls).
+
+## 10. Constants
+
+Code never holds a bare string or number that means something. Text for the user is a message key (section 8). Everything else is a named constant.
+
+### Folder structure
+
+```
+shared/constants/
+├── routes.ts              ROUTES, every URL of the app
+├── api-paths.ts           API_PATHS.V1
+├── api-error-codes.ts     ApiErrorCodes, the backend's stable codes we handle
+├── http-status.ts         HttpStatus
+├── cookie-names.ts        CookieNames
+├── storage-keys.ts        StorageKeys
+└── page-defaults.ts       page and size defaults (section 6)
+
+features/<feature>/constants/
+├── order-status.ts        OrderStatus
+├── order-limits.ts        OrderLimits
+└── order-sort-fields.ts   ORDER_SORT_FIELDS
+```
+
+### Rules
+
+1. No magic strings or numbers. A value that means something (a URL, a status, a limit, a cookie name, an error code) is a named constant.
+2. A constant that is used by two or more features lives in `shared/constants/`. A constant that belongs to one feature lives in that feature's `constants/`.
+3. A group of constants is an `as const` object with `UPPER_SNAKE_CASE` keys (`OrderLimits.MAX_AMOUNT`), the same naming as the backend constants. A single constant is `UPPER_SNAKE_CASE` too.
+4. A set of allowed values is an `as const` object, plus a type made from its values. We do not use TypeScript `enum`.
+5. Links are never typed by hand. Use `ROUTES` (`ROUTES.ORDERS.DETAIL(order.id)`). A route that takes a parameter is a function in `ROUTES`.
+6. Code compares `error.code` with `ApiErrorCodes` and `status` with `HttpStatus`, never with a literal. The earlier examples show literals only to stay short.
+7. Limits, defaults and allowed values that the backend also knows are kept in step with the backend and say so in a comment.
+8. Constants hold no text meant for the user. That is a message key.
+
+### Examples
+
+```ts
+// shared/constants/routes.ts
+export const ROUTES = {
+  HOME: "/",
+  LOGIN: "/login",
+  ORDERS: {
+    LIST: "/orders",
+    NEW: "/orders/new",
+    DETAIL: (id: string) => `/orders/${id}`,
+  },
+  PAYMENTS: { MY: "/payments/my" },
+} as const;
+```
+
+```ts
+// shared/constants/http-status.ts
+export const HttpStatus = {
+  BAD_REQUEST: 400,
+  NOT_FOUND: 404,
+  CONFLICT: 409,
+  UNPROCESSABLE: 422,
+  BAD_GATEWAY: 502,
+} as const;
+```
+
+```ts
+// shared/constants/api-error-codes.ts
+export const ApiErrorCodes = {
+  UNKNOWN: "UNKNOWN",
+  INVALID_RESPONSE: "INVALID_RESPONSE",
+} as const;
+```
+
+```ts
+// features/orders/constants/order-status.ts
+export const OrderStatus = {
+  PENDING: "PENDING",
+  PAID: "PAID",
+  SHIPPED: "SHIPPED",
+  CANCELLED: "CANCELLED",
+} as const;
+
+export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
+```
+
+```tsx
+// a link, and a comparison
+<Link href={ROUTES.ORDERS.DETAIL(order.id)}>...</Link>
+if (order.status === OrderStatus.SHIPPED) { ... }
+```
+
+## 11. Styling, theme and motion
+
+Styling uses Tailwind CSS v4 with shadcn/ui components. Colours, typography and motion are each defined in one place. Components use only those tokens, so a change to the look is one edit, and light and dark mode both work without extra code in the components.
+
+### How it fits together
+
+- Tailwind v4 is configured in CSS. There is no `tailwind.config.js`.
+- shadcn/ui components read colours from CSS variables. The light values are in `:root` and the dark values in `.dark`. A block called `@theme inline` maps those variables to Tailwind classes such as `bg-background`.
+- `next-themes` puts the `dark` class on the `<html>` element, so the variables switch with it. It follows the system setting by default and remembers the user's choice.
+- `motion` animates. `MotionConfig` with `reducedMotion="user"` turns off transform and layout animations for users who ask for reduced motion, and keeps opacity and colour changes.
+
+### Folder structure
+
+```
+src/app/
+├── globals.css               imports Tailwind and the theme files
+└── layout.tsx                fonts, providers, <html suppressHydrationWarning>
+
+shared/theme/
+├── tokens.css                colour variables: :root (light), .dark (dark), radius, @theme inline
+├── typography.css            font families, type roles (text-title, text-body, ...)
+├── fonts.ts                  next/font loaders
+├── motion.ts                 durations, easings, springs, variants
+└── theme-provider.tsx        wraps next-themes (Client Component)
+
+shared/providers/
+└── app-providers.tsx         ThemeProvider + MotionConfig, used once in layout.tsx
+
+components.json               shadcn settings (paths and aliases)
+```
+
+### Rules
+
+1. Colours are defined only in `tokens.css`, as hex values, with the light and dark values side by side. No other file holds a colour value.
+2. Colours have meaning names (`background`, `foreground`, `primary`, `muted`, `destructive`, `border`), never appearance names. We keep shadcn's variable names so components added with the shadcn CLI work unchanged. We add our own meaning tokens (`success`, `warning`, `info`, each with a `-foreground`) in the same file.
+3. Components use only the token classes (`bg-background`, `text-muted-foreground`, `border-border`). Raw colours (`bg-red-500`, `#fff`, `rgb(...)`) are not allowed. A `dark:` prefix on a colour is also not needed, because the variable already changes.
+4. Typography is defined only in `typography.css` and `fonts.ts`. Fonts are loaded with `next/font` and exposed as variables. Components use the type roles (`text-display`, `text-title`, `text-heading`, `text-body`, `text-caption`), not ad hoc font sizes and weights.
+5. Spacing, radius and shadows use the Tailwind scale and the radius token. No pixel values in class names (`p-[13px]`).
+6. Dark mode is switched by the `dark` class from `next-themes` (`attribute="class"`, `defaultTheme="system"`, `enableSystem`). The `<html>` element has `suppressHydrationWarning`, because the provider changes its class before React hydrates.
+7. Motion values (durations, easings, springs, variants) are defined only in `shared/theme/motion.ts`. Components never type a duration or an easing.
+8. `MotionConfig reducedMotion="user"` wraps the app once in `app-providers.tsx`. Animations must still make sense when transforms are off.
+9. Only Client Components animate, and only the wrappers in `shared/components/motion/` import `motion/react`. Feature code uses `<FadeIn>` and `<FadeUp>`, so a change of animation library touches one folder.
+10. Keep animations short and rare: page and list entrances, dialogs, feedback. Nothing loops without a reason.
+11. After `shadcn init` and after each `shadcn add`, check that new variables are copied into `tokens.css` and nothing is duplicated in `globals.css`.
+12. Tests and review: a screen is checked in both themes before it is done.
+
+### Colours
+
+The palette is Ingrain's "Obsidian Mint". Hex values are used as designed. The names are meaning names, and shadcn's own names are kept so components added with the CLI work unchanged.
+
+| Token | Light | Dark |
+|---|---|---|
+| `background` | #F7FAF8 | #0B1213 |
+| `card`, `popover` (Surface) | #FFFFFF | #162320 |
+| `muted`, `secondary`, `accent` (Subtle Surface) | #EDF5F1 | #20352E |
+| `foreground` (Primary Text) | #19332C | #F0FAF5 |
+| `muted-foreground` (Secondary Text) | #536D64 | #A5BBB2 |
+| `border`, `input` | #DDE9E2 | #2A433A |
+| `primary` (Primary Mint) | #087F65 | #27D5A0 |
+| `primary-hover` | #076B55 (Deep Mint) | #49E3B4 |
+| `primary-pressed` | #055541 | #1BB98C |
+| `primary-disabled` | #B9CEC4 | #42665A |
+| `primary-foreground` (Text on Primary) | #FFFFFF | #06251B |
+| `ring` (Focus) | #087F65 | #49E3B4 |
+| `success` | #16803D | #4ADE80 |
+| `warning` | #A65B08 | #F6BD60 |
+| `destructive` (Error) | #C63746 | #FF7584 |
+| `info` | #246BC4 | #75B6FF |
+| `ai` (AI Violet) | #7656C9 | #B9A0FF |
+
+`ai` is used only for AI features, so they look the same everywhere. The text colour on a semantic fill (`success-foreground` and so on) is not in the palette. We use the Text on Primary value of each theme (white in light, #06251B in dark), and it is validated below.
+
+```css
+/* shared/theme/tokens.css: the only file that holds colour values */
+:root {
+  --radius: 0.625rem;
+
+  --background: #F7FAF8;
+  --foreground: #19332C;
+  --card: #FFFFFF;
+  --card-foreground: #19332C;
+  --popover: #FFFFFF;
+  --popover-foreground: #19332C;
+  --muted: #EDF5F1;
+  --muted-foreground: #536D64;
+  --secondary: #EDF5F1;
+  --secondary-foreground: #19332C;
+  --accent: #EDF5F1;
+  --accent-foreground: #19332C;
+  --border: #DDE9E2;
+  --input: #DDE9E2;
+
+  --primary: #087F65;
+  --primary-hover: #076B55;
+  --primary-pressed: #055541;
+  --primary-disabled: #B9CEC4;
+  --primary-foreground: #FFFFFF;
+  --ring: #087F65;
+
+  --success: #16803D;
+  --success-foreground: #FFFFFF;
+  --warning: #A65B08;
+  --warning-foreground: #FFFFFF;
+  --destructive: #C63746;
+  --destructive-foreground: #FFFFFF;
+  --info: #246BC4;
+  --info-foreground: #FFFFFF;
+  --ai: #7656C9;
+  --ai-foreground: #FFFFFF;
+}
+
+.dark {
+  --background: #0B1213;
+  --foreground: #F0FAF5;
+  --card: #162320;
+  --card-foreground: #F0FAF5;
+  --popover: #162320;
+  --popover-foreground: #F0FAF5;
+  --muted: #20352E;
+  --muted-foreground: #A5BBB2;
+  --secondary: #20352E;
+  --secondary-foreground: #F0FAF5;
+  --accent: #20352E;
+  --accent-foreground: #F0FAF5;
+  --border: #2A433A;
+  --input: #2A433A;
+
+  --primary: #27D5A0;
+  --primary-hover: #49E3B4;
+  --primary-pressed: #1BB98C;
+  --primary-disabled: #42665A;
+  --primary-foreground: #06251B;
+  --ring: #49E3B4;
+
+  --success: #4ADE80;
+  --success-foreground: #06251B;
+  --warning: #F6BD60;
+  --warning-foreground: #06251B;
+  --destructive: #FF7584;
+  --destructive-foreground: #06251B;
+  --info: #75B6FF;
+  --info-foreground: #06251B;
+  --ai: #B9A0FF;
+  --ai-foreground: #06251B;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-pressed: var(--primary-pressed);
+  --color-primary-disabled: var(--primary-disabled);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-ai: var(--ai);
+  --color-ai-foreground: var(--ai-foreground);
+  --radius-lg: var(--radius);
+}
+```
+
+Interaction states are used through the token classes: `bg-primary hover:bg-primary-hover active:bg-primary-pressed`, `disabled:bg-primary-disabled`, and `focus-visible:ring-ring`.
+
+### Contrast check (WCAG 2.x, computed from the hex values)
+
+- Text and fills pass AA (4.5:1 or more) in both themes: primary text on background 12.9 (light) and 17.7 (dark), secondary text 5.1 to 8.0, white on Primary Mint 4.96, Text on Primary on dark mint 8.6, and the semantic text colours 5.0 to 5.3 (light) and 6.3 to 9.6 (dark).
+- Primary mint as text on the background is 4.72 (light) and 10.0 (dark), so it passes AA as link or button text.
+- The focus ring is 4.72 (light) and 11.65 (dark) against the background, above the 3:1 needed for focus indicators.
+- Disabled fills (`primary-disabled`) are 1.66 (light) and 2.55 (dark) with their text. Disabled controls are exempt from contrast requirements, but they must not be the only way to know a control is off.
+- Borders are 1.19 (light) and 1.77 (dark) against the background. This is fine for decorative dividers. A form control's outline (`input`) needs 3:1 to be identifiable, so inputs get a stronger border colour or a visible fill. This still needs a decision (open point 1 below).
+
+### Typography
+
+Plus Jakarta Sans is used for headings and Inter for body text and UI.
+
+```ts
+// shared/theme/fonts.ts
+import { Inter, Plus_Jakarta_Sans } from "next/font/google";
+
+export const fontHeading = Plus_Jakarta_Sans({ subsets: ["latin"], variable: "--font-plus-jakarta-sans", display: "swap" });
+export const fontSans = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
+```
+
+```css
+/* shared/theme/typography.css */
+@theme inline {
+  --font-sans: var(--font-inter);
+}
+
+@utility text-display { font-family: var(--font-plus-jakarta-sans), sans-serif; font-size: 2.25rem; line-height: 2.5rem; font-weight: 700; letter-spacing: -0.02em; }
+@utility text-title   { font-family: var(--font-plus-jakarta-sans), sans-serif; font-size: 1.5rem;  line-height: 2rem;    font-weight: 600; letter-spacing: -0.01em; }
+@utility text-heading { font-family: var(--font-plus-jakarta-sans), sans-serif; font-size: 1.125rem; line-height: 1.75rem; font-weight: 600; }
+@utility text-body    { font-family: var(--font-inter), sans-serif; font-size: 1rem;     line-height: 1.5rem;  font-weight: 400; }
+@utility text-caption { font-family: var(--font-inter), sans-serif; font-size: 0.875rem; line-height: 1.25rem; font-weight: 400; }
+```
+
+The sizes and weights are starting values. Headings (`text-display`, `text-title`, `text-heading`) use Plus Jakarta Sans, and body and UI roles use Inter.
+
+```css
+/* src/app/globals.css */
+@import "tailwindcss";
+@import "../shared/theme/tokens.css";
+@import "../shared/theme/typography.css";
+
+@layer base {
+  body { @apply bg-background text-foreground text-body; }
+}
+```
+
+### Providers and layout
+
+```tsx
+// shared/theme/theme-provider.tsx
+"use client";
+
+import { ThemeProvider as NextThemesProvider } from "next-themes";
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <NextThemesProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+      {children}
+    </NextThemesProvider>
+  );
+}
+```
+
+```tsx
+// shared/providers/app-providers.tsx
+"use client";
+
+import { MotionConfig } from "motion/react";
+
+export function AppProviders({ children }: { children: React.ReactNode }) {
+  return (
+    <ThemeProvider>
+      <MotionConfig reducedMotion="user">{children}</MotionConfig>
+    </ThemeProvider>
+  );
+}
+```
+
+```tsx
+// src/app/layout.tsx
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en" suppressHydrationWarning className={`${fontHeading.variable} ${fontSans.variable}`}>
+      <body>
+        <AppProviders>{children}</AppProviders>
+      </body>
+    </html>
+  );
+}
+```
+
+### Motion
+
+```ts
+// shared/theme/motion.ts
+import type { Transition, Variants } from "motion/react";
+
+export const MotionDuration = { FAST: 0.15, BASE: 0.25, SLOW: 0.4 } as const;
+
+export const transitions = {
+  base: { duration: MotionDuration.BASE, ease: [0.16, 1, 0.3, 1] },
+  fast: { duration: MotionDuration.FAST, ease: [0.16, 1, 0.3, 1] },
+  soft: { type: "spring", stiffness: 220, damping: 26 },
+} satisfies Record<string, Transition>;
+
+export const fadeVariants = {
+  hidden: { opacity: 0 },
+  visible: { opacity: 1, transition: transitions.base },
+} satisfies Variants;
+
+export const fadeUpVariants = {
+  hidden: { opacity: 0, y: 8 },
+  visible: { opacity: 1, y: 0, transition: transitions.base },
+} satisfies Variants;
+```
+
+```tsx
+// shared/components/motion/fade-up.tsx
+"use client";
+
+import { motion } from "motion/react";
+
+export function FadeUp({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <motion.div className={className} variants={fadeUpVariants} initial="hidden" animate="visible">
+      {children}
+    </motion.div>
+  );
+}
+```
+
+## 12. Shared components and patterns
+
+Components are grouped by purpose. Variation is handled by lookup tables and variants, not by `if/else` chains, so adding a case means adding an entry and nothing existing changes.
+
+### Folder structure
+
+```
+shared/
+├── components/
+│   ├── ui/          shadcn primitives made by the CLI (button, input, dialog, badge)
+│   ├── buttons/     our buttons built on ui/ (submit-button, icon-button, theme-toggle)
+│   ├── forms/       form-field (label + input + errors), field-errors
+│   ├── feedback/    error-screen, not-found-screen, empty-state, badge (with our variants), spinner
+│   ├── layout/      page-header, container, section
+│   └── motion/      fade-in, fade-up (the only files that import motion/react)
+└── utils/
+    └── cn.ts        class-name helper used by shadcn components
+```
+
+### Rules
+
+1. `ui/` holds the shadcn primitives. We change them only to adjust the base look or add a variant. They hold no business logic and know nothing about features.
+2. Our own components are built from `ui/` primitives and placed by purpose (`buttons/`, `forms/`, `feedback/`, `layout/`, `motion/`). A new group is added only when three or more components share a purpose.
+3. Dependencies point one way: feature components use `shared/components`, and inside it `buttons`, `forms`, `feedback` and `layout` use `ui`. `ui` uses nothing from the other groups.
+4. `shared/components` never imports from `features`. Anything that knows about orders, payments or users lives in that feature's `components/`.
+5. Variation is a variant, not a branch. Variants come from `cva` (shadcn already uses it). To add a look, add a variant entry. Do not add another boolean prop and another `if`.
+6. When a value decides what is shown (a status, a type, a role), the component uses a lookup table `Record<Value, Entry>`, declared `as const satisfies Record<Value, Entry>`. A new value without an entry fails the build. A `switch` or an `if/else` chain over a value is not used for this.
+7. A component has at most one boolean prop that changes how it looks. More than that means separate components or a variant.
+8. Prefer composition: a component takes `children` or named slots for the parts that vary, instead of a prop for every option.
+9. A component is a Server Component unless it needs the browser (section 7). Animation wrappers and the theme toggle are Client Components.
+10. Component and file names follow section 1 (kebab-case file, `PascalCase` export). One exported component per file.
+11. shadcn is configured in `components.json` so its generated files go to `shared/components/ui` and `cn` to `shared/utils/cn.ts`. Run the CLI from the project root.
+12. Components that move in this section: `ErrorScreen` and `NotFoundScreen` are in `feedback/`, and `FieldErrors` is in `forms/`.
+
+### Lookup table instead of if/else
+
+```ts
+// features/orders/constants/order-status.ts (see section 10)
+export const OrderStatus = { PENDING: "PENDING", PAID: "PAID", SHIPPED: "SHIPPED", CANCELLED: "CANCELLED" } as const;
+export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
+```
+
+```tsx
+// features/orders/components/order-status-badge.tsx
+import { Badge } from "@/shared/components/feedback/badge";
+
+type StatusEntry = { labelKey: OrderMessageKey; variant: BadgeVariant };
+
+const STATUS_ENTRIES = {
+  PENDING:   { labelKey: "order.status.pending",   variant: "warning" },
+  PAID:      { labelKey: "order.status.paid",      variant: "success" },
+  SHIPPED:   { labelKey: "order.status.shipped",   variant: "info" },
+  CANCELLED: { labelKey: "order.status.cancelled", variant: "destructive" },
+} as const satisfies Record<OrderStatus, StatusEntry>;
+
+export function OrderStatusBadge({ status }: { status: OrderStatus }) {
+  const { labelKey, variant } = STATUS_ENTRIES[status];
+  return <Badge variant={variant}>{tOrders(labelKey)}</Badge>;
+}
+```
+
+The status labels (`order.status.pending`, and so on) are keys in `orders.messages.ts`. Adding a status `REFUNDED` means adding it to `OrderStatus`. The build then fails on `STATUS_ENTRIES` until its entry is added, and `OrderStatusBadge` never changes.
+
+### Variants with cva
+
+```tsx
+// shared/components/feedback/badge.tsx
+import { cva, type VariantProps } from "class-variance-authority";
+
+const badgeVariants = cva("inline-flex items-center rounded-md px-2 py-0.5 text-caption", {
+  variants: {
+    variant: {
+      default: "bg-primary text-primary-foreground",
+      success: "bg-success text-success-foreground",
+      warning: "bg-warning text-warning-foreground",
+      info: "bg-info text-info-foreground",
+      destructive: "bg-destructive text-destructive-foreground",
+    },
+  },
+  defaultVariants: { variant: "default" },
+});
+
+export type BadgeVariant = NonNullable<VariantProps<typeof badgeVariants>["variant"]>;
+
+export function Badge({ variant, className, ...props }: React.ComponentProps<"span"> & { variant?: BadgeVariant }) {
+  return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
+}
+```
+
+### A button built on the primitive
+
+```tsx
+// shared/components/buttons/submit-button.tsx
+import { Button } from "@/shared/components/ui/button";
+
+export function SubmitButton({ pending, children }: { pending: boolean; children: React.ReactNode }) {
+  return (
+    <Button type="submit" disabled={pending}>
+      {children}
+    </Button>
+  );
+}
+```
+
+The form passes `pending` from `useActionState` (section 5), and the label is a message key resolved by the caller.
+
+## 13. Component size, composition and function rules
+
+Two goals. A component file reads like a short list of named parts. A function does one thing, and you can understand it without scrolling.
+
+### Components: how a big one is split
+
+A component stays one file until it has parts. Then it becomes a folder named after it. The main file has the same name as the folder and reads like a list of its parts.
+
+```
+features/orders/components/
+├── order-status-badge.tsx          small, stays one file
+├── order-details/
+│   ├── order-details.tsx           reads like a list of the parts below
+│   ├── order-header.tsx
+│   ├── order-amount.tsx
+│   └── order-actions.tsx
+└── order-list/
+    ├── order-list.tsx
+    ├── order-list-row.tsx
+    └── order-list-pagination.tsx
+```
+
+```tsx
+// features/orders/components/order-details/order-details.tsx
+export function OrderDetails({ order }: { order: Order }) {
+  return (
+    <article>
+      <OrderHeader id={order.id} status={order.status} createdAt={order.createdAt} />
+      <OrderAmount amount={order.amount} currency={order.currency} />
+      <OrderActions orderId={order.id} status={order.status} />
+    </article>
+  );
+}
+```
+
+Reading it gives the story of the screen: header, amount, actions. Each part's own markup and details are in its own small file.
+
+### Component rules
+
+1. A component has one visible job and one reason to change.
+2. Size guide: about 80 lines per component file, markup included, and about 7 direct children. Past that, split it. A file may be longer only when splitting would hide the story, and the reviewer agrees.
+3. Split by meaning, not by line count. A part becomes its own component when it has a name you would say aloud ("order header"), has its own state or logic, or repeats. Do not cut a file into pieces that have no name.
+4. The parent reads like a list. Its body is named components, with little logic and almost no raw markup. Layout wrappers (`<article>`, `<section>`) are fine.
+5. A part receives only what it shows. Pass the fields it uses, or the model when it shows most of it. Do not pass data through components that do not use it. Use `children` for that.
+6. One file while it is small. A folder only when it has parts. No folder with a single file, and no `index.ts` inside a component folder. Import the main file by its path.
+7. A part used by one component stays in that component's folder. When a second component needs it, it moves up to the feature's `components/`. When a second feature needs it, it moves to `shared/components/`. Move it when the need is real, not before.
+8. At most two folder levels under `components/`. If it needs more, the component is too big and should be rethought.
+9. Components render, they do not compute. Event handlers and state of a Client Component that grow past a few lines move to a function or a `use-<name>.ts` file next to the component.
+10. Differences between cases use a lookup table or a variant (section 12), not an `if/else` chain in the markup.
+11. Names: the folder is kebab-case, the component is `PascalCase`, and the parts start with the parent's noun (`order-header`, `order-amount`), so a search finds them together.
+12. Do not over-split. If the parent would become a list of one-line wrappers, keep it in one file. Three small related lines do not need a file.
+13. The same rules apply to `page.tsx` and to components in `shared/components`.
+
+### Function rules (logic that is not presentation)
+
+These apply to api functions, mappers, actions, rules, helpers and hooks.
+
+1. One function, one responsibility. The name says it. If the name needs "and", it is two functions.
+2. Return early. Check the failing cases first with guard clauses, then write the normal path without extra nesting. No `else` after a `return`. Nesting is at most two levels deep.
+3. Size guide: about 20 lines. A longer function is split into named steps. A function that coordinates (an action, an orchestrating api function) reads like a list of steps, and each step is a named function.
+4. Meaningful names. A function is a verb and a noun (`parseSearchParams`, `fieldErrorsFromViolations`). A boolean starts with `is`, `has`, `can` or `should`. No `data`, `info`, `item`, `handle`, `process` or `doStuff`. No unexplained abbreviations. `id` and `dto` are fine.
+5. Consistent words. One word per operation across the code: `get` for one item, `search` for a list, `create`, `update`, `cancel`, `format`, `parse`, `to` for conversions (`<Source>To<Target>`). We do not mix `fetch`, `load` and `get` for the same thing.
+6. At most three parameters. More than that takes one object. A boolean parameter that switches the behaviour is not allowed. Write two functions.
+7. Side effects stay at the edges. Mappers, rules, formatters and helpers are pure: the same input gives the same output, and they do not change their input. Network calls, redirects and cookies happen in api functions and actions only.
+8. A function either returns a value or does something. It does not do both quietly. A function that can fail in an expected way returns the result (`FormState`, `ActionResult`). Unexpected failures throw (section 4).
+9. Comments say why, not what. If a comment explains what the code does, rename or split the code instead.
+10. No magic values (section 10) and no hardcoded text (section 8).
+
+### Example: the same action, split by these rules
+
+The create-order action (section 5) coordinates five steps. The step that turns a backend error into a form state is its own function, so the action reads as a list and has no nested `if` blocks.
+
+```ts
+// features/orders/actions/create-order.action.ts
+"use server";
+
+export async function createOrderAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const values = formValuesFrom(formData);
+
+  const parsed = createOrderSchema.safeParse(values);
+  if (!parsed.success) {
+    return {
+      status: "error",
+      fieldErrors: translateFieldErrors(z.flattenError(parsed.error).fieldErrors, orderMessages),
+      values,
+    };
+  }
+
+  const violations = runRules(createOrderRules, parsed.data);
+  if (violations.length > 0) {
+    return { status: "error", fieldErrors: fieldErrorsFromViolations(violations, orderMessages), values };
+  }
+
+  let order: Order;
+  try {
+    order = await createOrder(createOrderFormToCreateOrderRequestDto(parsed.data));
+  } catch (e) {
+    return backendErrorToFormState(e, values);
+  }
+
+  redirect(ROUTES.ORDERS.DETAIL(order.id)); // outside the try/catch
+}
+
+function backendErrorToFormState(e: unknown, values: Record<string, string>): FormState {
+  if (!(e instanceof ApiError)) throw e; // goes to error.tsx
+
+  if (e.status === HttpStatus.BAD_REQUEST) {
+    return { status: "error", fieldErrors: fieldErrorsFrom(e.details), values };
+  }
+  if (e.status === HttpStatus.CONFLICT || e.status === HttpStatus.UNPROCESSABLE) {
+    return { status: "error", formError: e.message, values };
+  }
+  throw e;
+}
+```
+
+### Open points for the palette
+
+1. Input outlines: `input` is the same colour as `border` (1.19:1 in light). Choose a stronger input border or a filled input before building forms.
+2. The semantic text colours (`success-foreground` and the others) and the type sizes and weights are assumptions, not part of the supplied palette.
+3. The palette notes say the interaction and disabled tokens still need final component-level validation. The checks above cover text and focus contrast only.
