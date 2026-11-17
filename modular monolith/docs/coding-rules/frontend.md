@@ -79,6 +79,7 @@ export type OrderResponseDto = {
   id: string;
   status: "CREATED" | "SHIPPED" | "CANCELLED";
   amount: number;
+  currency: string; // "AUD"
   createdAt: string; // "2026-11-16T10:30:00Z"
 };
 
@@ -87,6 +88,7 @@ export type Order = {
   id: string;
   status: "CREATED" | "SHIPPED" | "CANCELLED";
   amount: number;
+  currency: string;
   createdAt: Date;
 };
 
@@ -96,6 +98,7 @@ export function orderResponseDtoToOrder(dto: OrderResponseDto): Order {
     id: dto.id,
     status: dto.status,
     amount: dto.amount,
+    currency: dto.currency,
     createdAt: new Date(dto.createdAt),
   };
 }
@@ -158,7 +161,7 @@ export class ApiError extends Error {
 ```ts
 // shared/api/api-client.ts
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${process.env.API_BASE_URL}${path}`, { cache: "no-store" });
+  const res = await fetch(`${getEnv().API_BASE_URL}${path}`, { cache: "no-store" });
   const body = (await res.json()) as ApiResponse<T>;
 
   if (!res.ok || !body.success) {
@@ -186,9 +189,9 @@ export async function getOrder(id: string): Promise<Order> {
 3. A feature api function is named `<verb><Resource>` (`getOrder`, `searchOrders`, `cancelOrder`). The file is named `<verb>-<resource>.api.ts`.
 4. A feature api function takes plain values or models, calls the client, maps the DTO, and returns a model. It contains no other logic.
 5. Paths use the `API_PATHS.V1` constant, never a repeated `/api/v1` string. The path rules are the backend's (plural kebab-case resources, no verbs, no trailing slash).
-6. The base URL comes from the `API_BASE_URL` environment variable. It has no `NEXT_PUBLIC_` prefix, so it stays on the server. Settings are validated in one place (see the later configuration section).
+6. The base URL comes from the `API_BASE_URL` environment variable, read through `getEnv()` (section 8). It has no `NEXT_PUBLIC_` prefix, so it stays on the server.
 7. `cache: "no-store"` is the default, so data is always fresh. Caching rules are added in a later section.
-8. These functions run on the server first, because `page.tsx` is a Server Component by default. Calling them from the browser is covered in the later client components section.
+8. These functions run on the server only. A Client Component never calls them directly. It calls a server action (section 7).
 9. An async function returns a `Promise<T>`. Callers use `await`.
 
 ## 4. Error handling
@@ -228,7 +231,7 @@ shared/
 12. The root `not-found.tsx` handles `notFound()` and any URL that matches no route. It is sent with every route, so it stays a Server Component with no interactive UI. `global-not-found` is experimental and is not used.
 13. Error boundaries do not catch errors in event handlers or in async code that runs after rendering. Those are handled inside the component (see the client components section).
 14. Not-authenticated (401) handling is defined with authentication, in a separate part.
-15. Screen text is not hardcoded. It comes from message keys (see the messages and configuration section). The examples below use plain text only to stay short.
+15. Screen text is not hardcoded. It comes from message keys (section 8). The examples below use plain text only to stay short.
 
 ### The helper and a page
 
@@ -347,7 +350,7 @@ features/<feature>/
 2. Each form has its own Zod schema in `schema/`. Create and update forms have separate schemas, with no shared groups, the same as separate request classes in the backend.
 3. The form type comes from `z.infer<typeof schema>`. It is never written by hand a second time.
 4. Browser forms send text. Use `z.coerce` for numbers and dates.
-5. Schemas hold message keys, not text. Keys are constants in a `<Form>FormMessages` object (`order.form.amount.positive`). The message service turns keys into text before they are returned in `FormState` (see the messages and configuration section). The examples below show the raw flow only.
+5. Schemas hold message keys, not text. Keys are constants in a `<Form>FormMessages` object (`order.form.amount.positive`), checked against the feature's message file (section 8). The action turns the keys into text with `translateFieldErrors` before it returns `FormState`. A message used by a schema has no placeholders, because a schema can carry only a key.
 6. A form submits to a server action in `actions/`. The file starts with `"use server"`. Actions are named `<verb><Resource>Action`.
 7. Expected failures are returned as a `FormState`, not thrown. Unexpected failures are thrown and land in the nearest `error.tsx` (section 4).
 8. An action does these steps in order: read the values, validate with the schema (check 2), call the api function (check 3), map errors, redirect.
@@ -383,7 +386,7 @@ export type CreateOrderForm = z.infer<typeof createOrderSchema>;
 export const CreateOrderFormMessages = {
   AMOUNT_POSITIVE: "order.form.amount.positive",
   NOTE_MAX: "order.form.note.max",
-} as const;
+} as const satisfies Record<string, OrderMessageKey>;
 ```
 
 ### Shared form types and helpers
@@ -442,7 +445,11 @@ export async function createOrderAction(_prev: FormState, formData: FormData): P
   const values = formValuesFrom(formData);
   const parsed = createOrderSchema.safeParse(values);                 // check 2
   if (!parsed.success) {
-    return { status: "error", fieldErrors: z.flattenError(parsed.error).fieldErrors, values };
+    return {
+      status: "error",
+      fieldErrors: translateFieldErrors(z.flattenError(parsed.error).fieldErrors, orderMessages),
+      values,
+    };
   }
 
   let order: Order;
@@ -543,7 +550,7 @@ features/<feature>/
 14. The URL page is zero-based, like the backend. Only the label shown to the user is one-based.
 15. A page past the end returns an empty list with 200, so the screen shows an empty-state text.
 16. Totals and page counts come from the backend. The frontend never counts.
-17. Dates and money are formatted with an explicit locale and time zone (defined in a later section). The examples below show them raw to stay short.
+17. Dates and money are shown with `formatDateTime` and `formatMoney` (section 8), never with `toLocaleDateString` or a raw number.
 18. Screen text uses message keys. The examples use plain text to stay short.
 19. Tests: each schema fallback (bad page, size over the cap, unknown sort, bad filter), `toPageResult`, `hrefWith` and `nextSort`.
 
@@ -712,8 +719,8 @@ export function OrderList({ result, params }: { result: PageResult<Order>; param
             <tr key={order.id}>
               <td><Link href={`/orders/${order.id}`}>{order.id}</Link></td>
               <td>{order.status}</td>
-              <td>{order.amount}</td>
-              <td>{order.createdAt.toLocaleDateString()}</td>
+              <td>{formatMoney(order.amount, order.currency)}</td>
+              <td>{formatDateTime(order.createdAt)}</td>
             </tr>
           ))}
         </tbody>
@@ -874,3 +881,207 @@ export function CancelOrderButton({ orderId }: { orderId: string }) {
 ```
 
 The Server Component `OrderDetails` renders `<CancelOrderButton orderId={order.id} />`. The prop is a plain string, so it crosses the boundary.
+
+## 8. Messages, configuration and formatting
+
+No text that we write is hardcoded. Code holds message keys, and one function turns a key into text. Settings are read once, checked against a schema, and the app refuses to start if one is missing. Dates and money are shown in one agreed format.
+
+### Folder structure
+
+```
+shared/
+├── messages/
+│   ├── create-translator.ts        createTranslator(messages)
+│   └── shared.messages.ts          shared texts and tShared
+├── config/
+│   └── env.ts                      the validated environment (server only)
+├── forms/
+│   └── translate-field-errors.ts   Zod keys -> text for FormState
+└── format/
+    ├── format-config.ts            FormatConfig.LOCALE and TIME_ZONE
+    ├── format-date.ts              formatDateTime
+    └── format-money.ts             formatMoney
+
+features/<feature>/
+├── messages/
+│   └── orders.messages.ts          the feature's key -> text, and tOrders
+└── schema/
+    └── create-order-form.messages.ts   key constants used by the schema
+
+src/instrumentation.ts              the startup check
+.env.local, .env.example            project root, not inside src/
+```
+
+### Message rules
+
+1. No text that we write is hardcoded in components, schemas or actions. Code holds keys only. Text that comes from the backend is already finished text and is shown as it is.
+2. Each feature owns `messages/<feature>.messages.ts`: an `as const` object of key -> text, and its translator made with `createTranslator` (`tOrders`). Shared texts live in `shared/messages/shared.messages.ts` with `tShared`.
+3. Keys are `<feature>.<area>.<name>`, lowercase with dots (`order.form.amount.positive`), the same naming as the backend. Shared keys start with `shared.`.
+4. English only for now. No i18n library is added until a second language is needed. When it is, the keys stay and only the translator is replaced.
+5. `t(key, ...args)` accepts only keys that exist in its file, so a typo fails the build. Dynamic values use `{0}`, `{1}` placeholders. Text is never concatenated.
+6. Components call `t("literal.key")`. A constants object (`<Form>FormMessages`) is used only where a key is carried without calling `t`, for example in a schema. It is declared `as const satisfies Record<string, <Feature>MessageKey>`.
+7. A feature uses only its own translator and `tShared`, never another feature's.
+8. A message used by a schema has no placeholders, because a schema can carry only a key. The text contains the number itself and is kept in step with the schema.
+9. Zod keys become text in the server action with `translateFieldErrors(fieldErrors, <feature>Messages)` before `FormState` is returned. Every constraint in a schema has a key. A message that is not one of our keys is replaced by `shared.form.invalid`.
+10. Backend text (`ApiError.message`, the field `details`) is shown as it is and never looked up. Screens decide what to do from `ApiError.code`, never from the text.
+11. Message files are not secret. They are used in both server and client components.
+
+### Configuration rules
+
+12. Only `shared/config/env.ts` reads `process.env`. Everything else calls `getEnv()`.
+13. `env.ts` starts with `import "server-only"` and holds a Zod schema that lists every variable and its type. An invalid or missing value throws an error that lists the fields.
+14. `src/instrumentation.ts` calls `getEnv()` inside `register()` (Node runtime only). Next.js completes `register()` before the server handles requests, so a bad configuration fails at startup and not on the first request.
+15. Required settings have no default in the schema. Values that are only for local work go in `.env.local`.
+16. `.env.local` (git-ignored, real values) and `.env.example` (committed, every variable with a dummy value) live in the project root, not inside `src/`. In production, environment variables set by the platform are used.
+17. Variables are server-only by default. The `NEXT_PUBLIC_` prefix is used only for values that are safe for the browser, because they are inlined at build time and cannot change after the build. The backend URL and secrets never use it.
+18. Variable names are `UPPER_SNAKE_CASE`.
+19. Tests: the env schema (valid, missing, malformed), `createTranslator` (placeholders), and `translateFieldErrors` (a known key, an unknown message).
+
+### Formatting rules
+
+20. Time travels as UTC ISO strings, and the mapper turns them into `Date`. Nothing is shown with `toLocaleString` or `toLocaleDateString` without explicit settings.
+21. Dates are shown with `formatDateTime` and money with `formatMoney`. Both use `Intl` formatters created once, with an explicit locale and time zone from `FormatConfig`.
+22. Changing the display locale or time zone is one edit in `format-config.ts`.
+23. Money is display-only. The frontend does no arithmetic on amounts, and the backend computes totals. A model that has an amount also carries its currency code.
+24. Tests: `formatDateTime` and `formatMoney` with fixed inputs.
+
+### Messages
+
+```ts
+// shared/messages/create-translator.ts
+export function createTranslator<T extends Record<string, string>>(messages: T) {
+  return function t(key: keyof T & string, ...args: (string | number)[]): string {
+    const template = messages[key];
+    return args.reduce<string>(
+      (text, arg, i) => text.replaceAll(`{${i}}`, String(arg)),
+      template,
+    );
+  };
+}
+```
+
+```ts
+// shared/messages/shared.messages.ts
+export const sharedMessages = {
+  "shared.form.invalid": "This value is not valid",
+} as const;
+
+export const tShared = createTranslator(sharedMessages);
+```
+
+```ts
+// features/orders/messages/orders.messages.ts
+export const orderMessages = {
+  "order.form.amount.label": "Amount",
+  "order.form.amount.positive": "Amount must be greater than 0",
+  "order.form.note.max": "Note must be at most 200 characters",
+  "order.form.submit": "Create order",
+} as const;
+
+export const tOrders = createTranslator(orderMessages);
+export type OrderMessageKey = keyof typeof orderMessages;
+```
+
+```ts
+// features/orders/schema/create-order-form.messages.ts
+export const CreateOrderFormMessages = {
+  AMOUNT_POSITIVE: "order.form.amount.positive",
+  NOTE_MAX: "order.form.note.max",
+} as const satisfies Record<string, OrderMessageKey>;
+```
+
+```tsx
+// in a component
+<label htmlFor="amount">{tOrders("order.form.amount.label")}</label>
+<button disabled={pending}>{tOrders("order.form.submit")}</button>
+```
+
+```ts
+// shared/forms/translate-field-errors.ts
+export function translateFieldErrors(
+  fieldErrors: Record<string, string[] | undefined>,
+  messages: Record<string, string>,
+): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const [field, keys] of Object.entries(fieldErrors)) {
+    result[field] = (keys ?? []).map(
+      (key) => messages[key] ?? tShared("shared.form.invalid"),
+    );
+  }
+  return result;
+}
+```
+
+### Configuration
+
+```ts
+// shared/config/env.ts
+import "server-only";
+import { z } from "zod";
+
+const envSchema = z.object({
+  API_BASE_URL: z.string().url(),
+});
+
+export type Env = z.infer<typeof envSchema>;
+
+let cached: Env | undefined;
+
+export function getEnv(): Env {
+  if (cached) return cached;
+  const parsed = envSchema.safeParse(process.env);
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid environment variables: ${JSON.stringify(z.flattenError(parsed.error).fieldErrors)}`,
+    );
+  }
+  cached = parsed.data;
+  return cached;
+}
+```
+
+```ts
+// src/instrumentation.ts
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { getEnv } = await import("./shared/config/env");
+    getEnv(); // fails here if a variable is missing or invalid
+  }
+}
+```
+
+### Formatting
+
+```ts
+// shared/format/format-config.ts
+export const FormatConfig = {
+  LOCALE: "en",
+  TIME_ZONE: "UTC",
+} as const;
+```
+
+```ts
+// shared/format/format-date.ts
+const dateTime = new Intl.DateTimeFormat(FormatConfig.LOCALE, {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: FormatConfig.TIME_ZONE,
+});
+
+export function formatDateTime(date: Date): string {
+  return dateTime.format(date);
+}
+```
+
+```ts
+// shared/format/format-money.ts
+export function formatMoney(amount: number, currency: string): string {
+  return new Intl.NumberFormat(FormatConfig.LOCALE, { style: "currency", currency }).format(amount);
+}
+```
+
+```tsx
+// in a list row
+<td>{formatMoney(order.amount, order.currency)}</td>
+<td>{formatDateTime(order.createdAt)}</td>
+```
