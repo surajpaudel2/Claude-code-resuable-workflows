@@ -753,3 +753,124 @@ export function OrderFilters({ params }: { params: OrderSearchParams }) {
   );
 }
 ```
+
+## 7. Client components
+
+Components are Server Components by default. A Client Component is used only when the screen must react to the user (a click, state, a browser-only API). The browser never calls the backend directly. A Client Component calls a server action, and the action calls the api function. The server side keeps `API_BASE_URL`, tokens and the `ApiResponse` handling, and there is no CORS setup.
+
+### Folder structure
+
+```
+shared/
+├── actions/
+│   └── action-result.ts          ActionResult, the result of a non-form action
+└── api/
+    └── api-client.ts             starts with import "server-only"; apiGet, apiGetPage, apiPost
+
+features/<feature>/
+├── actions/
+│   └── cancel-order.action.ts    "use server"
+├── api/
+│   └── cancel-order.api.ts       POST to the backend, returns a model
+└── components/
+    └── cancel-order-button.tsx   "use client"
+```
+
+### Rules
+
+1. Every component is a Server Component unless it needs the browser. Do not add `"use client"` "just in case".
+2. Use a Client Component only for event handlers, state or effects (hooks), and browser-only APIs. Fetching data, layout, text and links stay on the server.
+3. `"use client"` is the first line of the file, before the imports. The file and everything it imports are sent to the browser.
+4. Keep Client Components small and at the leaves of the tree: a button, a form, a toggle. A page, a layout or a whole list is never a Client Component.
+5. Props from a Server Component to a Client Component must be serializable data (strings, numbers, booleans, plain objects, arrays). Functions such as event handlers cannot cross. Pass only what the component needs (an `orderId`, not the whole order) and never secrets or tokens.
+6. A Server Component can appear inside a Client Component only as `children` (or another prop). It is never imported by the Client Component.
+7. The browser never calls the Spring backend. A Client Component calls a server action, and the action calls a feature api function.
+8. A server action can be reached by a direct POST request, not only through the UI. Every action verifies authentication and authorization (see the authentication part), and the backend stays the authority.
+9. A server action file starts with `"use server"` and exports only async functions, named `<verb><Resource>Action`. Expected failures are returned as an `ActionResult` or a `FormState`. Unexpected failures are thrown.
+10. For a button or another event, use `useTransition` with `startTransition(async () => ...)` for the pending state, and `useState` for the error text. For a form submit, use the form pattern from section 5.
+11. Do not hide unexpected errors with a `try/catch` in a handler. An unhandled error inside `startTransition` goes up to the nearest `error.tsx` (section 4). Error boundaries do not catch errors thrown directly in an event handler, so the handler returns expected failures from the action and lets the rest go through `startTransition`.
+12. After a change, the action calls `revalidatePath(path)` so the affected page shows fresh data. `revalidatePath` runs only on the server, never in a Client Component.
+13. `import "server-only"` goes at the top of `shared/api/api-client.ts` and of any module that reads private environment variables or secrets. A Client Component that imports such a module, directly or through other modules, fails the build. Modules that import `api-client` need no extra line. A `"use server"` action file is safe to import from a Client Component.
+14. The backend URL and secrets never use the `NEXT_PUBLIC_` prefix.
+15. A control is disabled while its action is `pending`.
+16. Screen text uses message keys. The examples use plain text to stay short.
+17. Tests: each action path (success, a returned 409 or 422 message, an unexpected error that is rethrown) and each component state (idle, pending, error shown).
+
+### The server-only guard and the POST helper
+
+```ts
+// shared/api/api-client.ts
+import "server-only";
+
+export async function apiPost<T>(path: string, payload?: unknown): Promise<T> {
+  const body = await send<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  return body.data as T;
+}
+```
+
+`send(path, init?)` is the private fetch-and-error function from section 6. It takes optional fetch settings, and `apiGet`, `apiGetPage` and `apiPost` all use it. Writes (`apiPost`, `apiPut`, `apiPatch`, `apiDelete`) follow the same pattern, so every failure is still an `ApiError` from one place.
+
+### The api function, the action and the button
+
+```ts
+// features/orders/api/cancel-order.api.ts
+export async function cancelOrder(id: string): Promise<Order> {
+  const dto = await apiPost<OrderResponseDto>(`${API_PATHS.V1}/orders/${id}/cancel`);
+  return orderResponseDtoToOrder(dto);
+}
+```
+
+```ts
+// shared/actions/action-result.ts
+export type ActionResult =
+  | { status: "success" }
+  | { status: "error"; message: string };
+```
+
+```ts
+// features/orders/actions/cancel-order.action.ts
+"use server";
+
+export async function cancelOrderAction(orderId: string): Promise<ActionResult> {
+  try {
+    await cancelOrder(orderId);
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 409 || e.status === 422)) {
+      return { status: "error", message: e.message }; // e.g. ORDER_ALREADY_SHIPPED
+    }
+    throw e; // anything else goes to error.tsx
+  }
+  revalidatePath(`/orders/${orderId}`);
+  return { status: "success" };
+}
+```
+
+```tsx
+// features/orders/components/cancel-order-button.tsx
+"use client";
+
+export function CancelOrderButton({ orderId }: { orderId: string }) {
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string>();
+
+  function handleClick() {
+    startTransition(async () => {
+      const result = await cancelOrderAction(orderId);
+      setError(result.status === "error" ? result.message : undefined);
+    });
+  }
+
+  return (
+    <>
+      <button onClick={handleClick} disabled={pending}>Cancel order</button>
+      {error && <p role="alert">{error}</p>}
+    </>
+  );
+}
+```
+
+The Server Component `OrderDetails` renders `<CancelOrderButton orderId={order.id} />`. The prop is a plain string, so it crosses the boundary.
