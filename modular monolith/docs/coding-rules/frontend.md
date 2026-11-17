@@ -488,3 +488,268 @@ export function CreateOrderForm() {
   );
 }
 ```
+
+## 6. Pagination, filtering and sorting
+
+The state of a list (page, size, sort, filters) lives in the URL, not in component state. The page reads the URL, calls the backend with the same parameters, and shows the result. Every control (next page, sort, filter) is a link or a plain GET form that changes the URL. This matches the backend list endpoints, which take `page`, `size`, `sort` and filters as query parameters.
+
+### Folder structure
+
+```
+shared/
+├── constants/page-defaults.ts       DEFAULT_PAGE=0, DEFAULT_SIZE=20, MAX_SIZE=100, DEFAULT_SORT="createdAt,desc"
+├── api/
+│   ├── api-response.ts              PageInfo (mirrors the backend)
+│   └── api-client.ts                apiGetPage<T> and Paged<T>, next to apiGet
+└── pagination/
+    ├── page-params.schema.ts        pageField, sizeField, sortField(allowed)
+    ├── page-result.ts               PageResult<T> and toPageResult
+    ├── href-with.ts                 builds a link that changes some parameters
+    └── next-sort.ts                 flips the sort direction
+
+features/<feature>/
+├── schema/order-search-params.schema.ts   ORDER_SORT_FIELDS and the search params schema
+├── api/search-orders.api.ts               returns PageResult<Order>
+└── components/
+    ├── order-list.tsx                     table, sort links, Previous and Next
+    └── order-filters.tsx                  the filter form
+```
+
+### Request flow
+
+`/orders?page=1&size=20&sort=createdAt,desc&status=SHIPPED`
+
+1. `page.tsx` awaits `searchParams` and validates it with the module's Zod schema. Bad or missing values become defaults.
+2. `searchOrders(params)` builds the query string and calls the backend with `apiGetPage`.
+3. `toPageResult` maps the DTOs to models and the `PageInfo` to a `PageResult`.
+4. The page renders `OrderList` with the result and the current params.
+5. A click on a link or a filter submit changes the URL, and the flow runs again.
+
+### Rules
+
+1. List state lives in the URL query string. No client state is used for it.
+2. Parameter names and formats are the backend's: `page` is zero-based (default 0), `size` (default 20, max 100), `sort` is `field` or `field,asc|desc` with one field only. Filter names are camelCase.
+3. The defaults and the size cap live in `shared/constants/page-defaults.ts`, and are kept in step with the backend `PageDefaults`.
+4. A list page reads `searchParams`, which is a `Promise` and is awaited, and validates it with a Zod schema. A module builds its schema from the shared `pageField`, `sizeField` and `sortField` and adds its own filters.
+5. A missing or invalid parameter falls back to its default with `.catch(...)`. A bad URL never shows an error screen, and `parse` never throws. This differs from forms, where invalid input is reported.
+6. Each module defines its sort allowlist (`ORDER_SORT_FIELDS`), matching the backend `XSortFields` and the entity field names. Any other value falls back to the default sort.
+7. Paged calls use `apiGetPage`, which returns the items and the `PageInfo`. `apiGet` returns only `data`. The envelope is still read in `api-client.ts` only.
+8. A feature list function returns `PageResult<Model>` through `toPageResult(paged, mapper)`. Components never see DTOs, the envelope or `PageInfo`.
+9. Only parameters that have a value are sent to the backend.
+10. The list page and its components are Server Components. They have no state and no `"use client"`.
+11. Previous and Next are `<Link>`s built with `hrefWith`. They appear only when `hasPrevious` or `hasNext` says so. The frontend never calculates this.
+12. A sort link uses `nextSort` and resets `page` to 0. A new filter also goes back to the first page, because the form sends no `page`.
+13. Filters are a `<form method="get">` that points at the list path. It carries `size` and `sort` as hidden inputs, and each field's `defaultValue` comes from the current params.
+14. The URL page is zero-based, like the backend. Only the label shown to the user is one-based.
+15. A page past the end returns an empty list with 200, so the screen shows an empty-state text.
+16. Totals and page counts come from the backend. The frontend never counts.
+17. Dates and money are formatted with an explicit locale and time zone (defined in a later section). The examples below show them raw to stay short.
+18. Screen text uses message keys. The examples use plain text to stay short.
+19. Tests: each schema fallback (bad page, size over the cap, unknown sort, bad filter), `toPageResult`, `hrefWith` and `nextSort`.
+
+### Defaults and shared building blocks
+
+```ts
+// shared/constants/page-defaults.ts
+export const PageDefaults = {
+  DEFAULT_PAGE: 0,
+  DEFAULT_SIZE: 20,
+  MAX_SIZE: 100,
+  DEFAULT_SORT: "createdAt,desc",
+} as const;
+```
+
+```ts
+// shared/pagination/page-params.schema.ts
+export const pageField = z.coerce.number().int().min(0)
+  .catch(PageDefaults.DEFAULT_PAGE);
+
+export const sizeField = z.coerce.number().int().min(1).max(PageDefaults.MAX_SIZE)
+  .catch(PageDefaults.DEFAULT_SIZE);
+
+export function sortField(allowed: readonly string[]) {
+  return z.string()
+    .refine((s) => /^[A-Za-z]+(,(asc|desc))?$/.test(s) && allowed.includes(s.split(",")[0]))
+    .catch(PageDefaults.DEFAULT_SORT);
+}
+```
+
+### Module search params and the page
+
+```ts
+// features/orders/schema/order-search-params.schema.ts
+export const ORDER_SORT_FIELDS = ["createdAt", "amount", "status"] as const;
+
+export const orderSearchParamsSchema = z.object({
+  page: pageField,
+  size: sizeField,
+  sort: sortField(ORDER_SORT_FIELDS),
+  status: z.enum(["CREATED", "SHIPPED", "CANCELLED"]).optional().catch(undefined),
+});
+
+export type OrderSearchParams = z.infer<typeof orderSearchParamsSchema>;
+```
+
+```tsx
+// app/orders/page.tsx
+export default async function OrdersPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = orderSearchParamsSchema.parse(await searchParams);
+  const result = await searchOrders(params);
+  return (
+    <>
+      <OrderFilters params={params} />
+      <OrderList result={result} params={params} />
+    </>
+  );
+}
+```
+
+### The paged api call and the result model
+
+```ts
+// shared/api/api-response.ts
+export type PageInfo = {
+  page: number; size: number; totalElements: number;
+  totalPages: number; hasNext: boolean; hasPrevious: boolean;
+};
+```
+
+```ts
+// shared/api/api-client.ts
+export type Paged<T> = { items: T[]; pagination: PageInfo };
+
+export async function apiGetPage<T>(path: string): Promise<Paged<T>> {
+  const body = await send<T[]>(path); // the same fetch and ApiError handling as apiGet
+  return { items: body.data ?? [], pagination: body.pagination as PageInfo };
+}
+```
+
+`send` is the private fetch-and-error part of `apiGet`. `apiGet` returns `(await send<T>(path)).data as T`.
+
+```ts
+// shared/pagination/page-result.ts
+export type PageResult<T> = {
+  items: T[]; page: number; size: number;
+  totalElements: number; totalPages: number; hasNext: boolean; hasPrevious: boolean;
+};
+
+export function toPageResult<D, M>(paged: Paged<D>, map: (dto: D) => M): PageResult<M> {
+  const p = paged.pagination;
+  return {
+    items: paged.items.map(map),
+    page: p.page, size: p.size, totalElements: p.totalElements,
+    totalPages: p.totalPages, hasNext: p.hasNext, hasPrevious: p.hasPrevious,
+  };
+}
+```
+
+```ts
+// features/orders/api/search-orders.api.ts
+export async function searchOrders(params: OrderSearchParams): Promise<PageResult<Order>> {
+  const query = new URLSearchParams({
+    page: String(params.page), size: String(params.size), sort: params.sort,
+  });
+  if (params.status) query.set("status", params.status);
+
+  const paged = await apiGetPage<OrderResponseDto>(`${API_PATHS.V1}/orders?${query}`);
+  return toPageResult(paged, orderResponseDtoToOrder);
+}
+```
+
+### Link helpers
+
+```ts
+// shared/pagination/href-with.ts
+export function hrefWith(
+  basePath: string,
+  params: Record<string, string | number | undefined>,
+  changes: Record<string, string | number | undefined>,
+): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries({ ...params, ...changes })) {
+    if (value !== undefined) query.set(key, String(value));
+  }
+  return `${basePath}?${query}`;
+}
+```
+
+```ts
+// shared/pagination/next-sort.ts
+export function nextSort(current: string, field: string): string {
+  const [currentField, direction = "asc"] = current.split(",");
+  return `${field},${currentField === field && direction === "asc" ? "desc" : "asc"}`;
+}
+```
+
+### The list and the filters
+
+```tsx
+// features/orders/components/order-list.tsx
+import Link from "next/link";
+
+export function OrderList({ result, params }: { result: PageResult<Order>; params: OrderSearchParams }) {
+  return (
+    <>
+      <table>
+        <thead>
+          <tr>
+            <th>Order</th>
+            <th>Status</th>
+            <th>
+              <Link href={hrefWith("/orders", params, { sort: nextSort(params.sort, "amount"), page: 0 })}>Amount</Link>
+            </th>
+            <th>
+              <Link href={hrefWith("/orders", params, { sort: nextSort(params.sort, "createdAt"), page: 0 })}>Created</Link>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {result.items.map((order) => (
+            <tr key={order.id}>
+              <td><Link href={`/orders/${order.id}`}>{order.id}</Link></td>
+              <td>{order.status}</td>
+              <td>{order.amount}</td>
+              <td>{order.createdAt.toLocaleDateString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {result.items.length === 0 && <p>No orders found</p>}
+
+      <nav aria-label="Pagination">
+        {result.hasPrevious && (
+          <Link href={hrefWith("/orders", params, { page: result.page - 1 })}>Previous</Link>
+        )}
+        <span>Page {result.page + 1} of {result.totalPages}</span>
+        {result.hasNext && (
+          <Link href={hrefWith("/orders", params, { page: result.page + 1 })}>Next</Link>
+        )}
+      </nav>
+    </>
+  );
+}
+```
+
+```tsx
+// features/orders/components/order-filters.tsx
+export function OrderFilters({ params }: { params: OrderSearchParams }) {
+  return (
+    <form action="/orders" method="get">
+      <label htmlFor="status">Status</label>
+      <select id="status" name="status" defaultValue={params.status ?? ""}>
+        <option value="">All</option>
+        <option value="CREATED">Created</option>
+        <option value="SHIPPED">Shipped</option>
+        <option value="CANCELLED">Cancelled</option>
+      </select>
+      <input type="hidden" name="size" value={params.size} />
+      <input type="hidden" name="sort" value={params.sort} />
+      <button>Apply</button>
+    </form>
+  );
+}
+```
