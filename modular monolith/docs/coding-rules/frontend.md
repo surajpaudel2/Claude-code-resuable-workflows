@@ -304,3 +304,187 @@ export default function NotFound() {
   return <NotFoundScreen />;
 }
 ```
+
+## 5. Forms and validation
+
+Validation happens in three checks, like the backend validation levels. The backend is always the authority. The earlier checks only give faster feedback.
+
+| Check | Where | What it checks | Result |
+|---|---|---|---|
+| 1. Browser | HTML attributes on the inputs (`required`, `min`, `maxLength`) | required, range, length | the browser's own message, no request sent |
+| 2. Server action | Zod schema, `safeParse` | required, format, range | `FormState` with `fieldErrors` |
+| 3. Backend | Bean Validation and business rules | shape, state, rules | 400 with field details, or 409 and 422 with an error code |
+
+A form submits to a server action (a function marked `"use server"`). The browser never calls the backend itself, so `API_BASE_URL` and tokens stay on the server.
+
+### Folder structure
+
+```
+shared/
+├── forms/
+│   ├── form-state.ts            FormState, the result every form action returns
+│   ├── form-values-from.ts      FormData -> plain object of text values
+│   └── field-errors-from.ts     backend FieldErrorInfo[] -> field -> messages
+└── components/
+    └── field-errors.tsx         shows the error list under one input
+
+features/<feature>/
+├── schema/
+│   ├── create-order.schema.ts           Zod schema and the type inferred from it
+│   └── create-order-form.messages.ts    message key constants
+├── actions/
+│   └── create-order.action.ts           the server action ("use server")
+├── mapper/
+│   └── create-order-form-to-create-order-request-dto.mapper.ts
+├── api/create-order.api.ts              POST to the backend, returns a model
+└── components/
+    └── create-order-form.tsx            the form ("use client")
+```
+
+### Rules
+
+1. The backend is the authority. Checks 1 and 2 must never be the only protection. Their values (`min`, `maxLength`, the Zod rules) are kept in step with the backend annotations.
+2. Each form has its own Zod schema in `schema/`. Create and update forms have separate schemas, with no shared groups, the same as separate request classes in the backend.
+3. The form type comes from `z.infer<typeof schema>`. It is never written by hand a second time.
+4. Browser forms send text. Use `z.coerce` for numbers and dates.
+5. Schemas hold message keys, not text. Keys are constants in a `<Form>FormMessages` object (`order.form.amount.positive`). The message service turns keys into text before they are returned in `FormState` (see the messages and configuration section). The examples below show the raw flow only.
+6. A form submits to a server action in `actions/`. The file starts with `"use server"`. Actions are named `<verb><Resource>Action`.
+7. Expected failures are returned as a `FormState`, not thrown. Unexpected failures are thrown and land in the nearest `error.tsx` (section 4).
+8. An action does these steps in order: read the values, validate with the schema (check 2), call the api function (check 3), map errors, redirect.
+9. A backend 400 uses `fieldErrorsFrom(e.details)` and fills `fieldErrors`. A 409 or 422 fills `formError` with the backend message. Any other `ApiError` is rethrown.
+10. `redirect()` works by throwing. It is called outside every `try/catch`.
+11. Form values go through a mapper to a request DTO (`<Form>FormTo<Request>Dto`), and the api function posts that DTO and returns a model. The action never builds a DTO by hand and never calls `fetch`.
+12. React clears uncontrolled fields after an action finishes. Every error return includes `values`, and each input uses `defaultValue={state.values?.<field>}`. Sensitive fields (a password, a card number) are never put in `values`.
+13. The form component is a Client Component. It uses `useActionState(action, initialState)`, passes `formAction` to `<form action>`, and sets `disabled={pending}` on the submit button.
+14. Each input's `name` matches its schema field. Each input has a label linked with `htmlFor` and `id`.
+15. Field errors are shown with the shared `FieldErrors` component. The form-level message uses `role="alert"`.
+16. Check 1 uses plain HTML attributes. A browser-side Zod check needs an `onSubmit` handler that starts the action by hand (`startTransition`). That gives up React's automatic form reset and submission without JavaScript, so it is added only when a real need appears.
+17. The page that shows the form stays a thin Server Component that renders the form component.
+18. Labels and button text are not hardcoded. They use message keys. The examples use plain text only to stay short.
+19. Tests: each schema constraint, and each action path (invalid input, a backend 400, a backend 409 or 422, success with redirect).
+
+### The schema and its message keys
+
+```ts
+// features/orders/schema/create-order.schema.ts
+import { z } from "zod";
+import { CreateOrderFormMessages as M } from "./create-order-form.messages";
+
+export const createOrderSchema = z.object({
+  amount: z.coerce.number().positive(M.AMOUNT_POSITIVE),
+  note: z.string().max(200, M.NOTE_MAX).optional(),
+});
+
+export type CreateOrderForm = z.infer<typeof createOrderSchema>;
+```
+
+```ts
+// features/orders/schema/create-order-form.messages.ts
+export const CreateOrderFormMessages = {
+  AMOUNT_POSITIVE: "order.form.amount.positive",
+  NOTE_MAX: "order.form.note.max",
+} as const;
+```
+
+### Shared form types and helpers
+
+```ts
+// shared/forms/form-state.ts
+export type FormState = {
+  status: "idle" | "success" | "error";
+  fieldErrors?: Record<string, string[]>; // field name -> text to show
+  formError?: string;                     // one message for the whole form
+  values?: Record<string, string>;        // what the user typed
+};
+```
+
+```ts
+// shared/forms/form-values-from.ts
+export function formValuesFrom(formData: FormData): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const [key, value] of formData.entries()) {
+    if (typeof value === "string") values[key] = value;
+  }
+  return values;
+}
+```
+
+```ts
+// shared/forms/field-errors-from.ts
+export function fieldErrorsFrom(details: FieldErrorInfo[]): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const { field, message } of details) {
+    (result[field] ??= []).push(message);
+  }
+  return result;
+}
+```
+
+```tsx
+// shared/components/field-errors.tsx
+export function FieldErrors({ errors }: { errors?: string[] }) {
+  if (!errors?.length) return null;
+  return (
+    <ul role="alert">
+      {errors.map((e) => <li key={e}>{e}</li>)}
+    </ul>
+  );
+}
+```
+
+### The server action
+
+```ts
+// features/orders/actions/create-order.action.ts
+"use server";
+
+export async function createOrderAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const values = formValuesFrom(formData);
+  const parsed = createOrderSchema.safeParse(values);                 // check 2
+  if (!parsed.success) {
+    return { status: "error", fieldErrors: z.flattenError(parsed.error).fieldErrors, values };
+  }
+
+  let order: Order;
+  try {
+    order = await createOrder(createOrderFormToCreateOrderRequestDto(parsed.data)); // check 3 runs in the backend
+  } catch (e) {
+    if (e instanceof ApiError) {
+      if (e.status === 400) return { status: "error", fieldErrors: fieldErrorsFrom(e.details), values };
+      if (e.status === 409 || e.status === 422) return { status: "error", formError: e.message, values };
+    }
+    throw e; // anything else goes to error.tsx
+  }
+
+  redirect(`/orders/${order.id}`); // outside the try/catch
+}
+```
+
+### The form
+
+```tsx
+// features/orders/components/create-order-form.tsx
+"use client";
+
+const initialState: FormState = { status: "idle" };
+
+export function CreateOrderForm() {
+  const [state, formAction, pending] = useActionState(createOrderAction, initialState);
+
+  return (
+    <form action={formAction}>
+      <label htmlFor="amount">Amount</label>
+      <input id="amount" name="amount" type="number" step="0.01" min="0.01" required
+             defaultValue={state.values?.amount} />
+      <FieldErrors errors={state.fieldErrors?.amount} />
+
+      <label htmlFor="note">Note</label>
+      <textarea id="note" name="note" maxLength={200} defaultValue={state.values?.note} />
+      <FieldErrors errors={state.fieldErrors?.note} />
+
+      {state.formError && <p role="alert">{state.formError}</p>}
+      <button disabled={pending}>Create order</button>
+    </form>
+  );
+}
+```
